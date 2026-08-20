@@ -1,0 +1,47 @@
+{
+  "format": "lattice-estimator/parameter-set",
+  "version": 2,
+  "id": "ntru-security-notebook",
+  "name": "NTRU Security Notebook 参数方案",
+  "description": "从 ntru_security.ipynb 的 LWE、key switching LWE 与标准环 NTRU 调用迁移。",
+  "tags": ["migrated", "notebook", "ntru"],
+  "cases": [
+    {
+      "id": "lwe",
+      "name": "LWE",
+      "description": "原 SparseTernary 调用按 Primus 概率语义规范化：P(-1)=1/4、P(0)=1/2、P(1)=1/4。",
+      "problem": {
+        "kind": "lwe",
+        "dimension": 780,
+        "modulus": "1024",
+        "samples": { "kind": "unlimited" },
+        "secret": { "kind": "sparse_ternary" },
+        "error": { "kind": "discrete_gaussian", "standard_deviation": "3.2" }
+      }
+    },
+    {
+      "id": "key-switch",
+      "name": "Key switching LWE",
+      "problem": {
+        "kind": "lwe",
+        "dimension": 780,
+        "modulus": "132120577",
+        "samples": { "kind": "unlimited" },
+        "secret": { "kind": "sparse_ternary" },
+        "error": { "kind": "discrete_gaussian", "standard_deviation": "409.6" }
+      }
+    },
+    {
+      "id": "ntru",
+      "name": "Standard NTRU",
+      "problem": {
+        "kind": "ntru",
+        "dimension": 1024,
+        "modulus": "132120577",
+        "secret": { "kind": "discrete_gaussian", "standard_deviation": "6.88" },
+        "error": { "kind": "discrete_gaussian", "standard_deviation": "6.88" },
+        "structure": "circulant"
+      }
+    }
+  ]
+}

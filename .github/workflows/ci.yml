@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path backend/Cargo.toml --all --check
+      - run: cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path backend/Cargo.toml --all-targets
+      - run: cargo run --locked --quiet --manifest-path backend/Cargo.toml --bin lattice-estimator-schema -- --check
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.21.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm --dir frontend install --frozen-lockfile
+      - run: pnpm --dir frontend check
+      - run: pnpm --dir frontend build
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker build -t lattice-estimator-web:dev .
+      - name: Smoke test runtime image
+        shell: bash
+        run: |
+          docker run -d --name lattice-estimator-web -p 127.0.0.1:8080:8080 \
+            -e LATTICE_ESTIMATOR_API_URL=http://127.0.0.1:9/ \
+            lattice-estimator-web:dev
+          trap 'docker logs lattice-estimator-web; docker rm -f lattice-estimator-web' EXIT
+          for attempt in {1..30}; do
+            curl --fail http://127.0.0.1:8080/healthz && exit 0
+            sleep 1
+          done
+          exit 1

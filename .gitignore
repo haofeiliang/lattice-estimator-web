@@ -1,0 +1,13 @@
+# Rust
+target/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Local runtime
+.env
+
+# Editors and notebooks
+.idea/
+.vscode/

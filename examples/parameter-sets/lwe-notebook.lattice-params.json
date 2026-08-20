@@ -1,0 +1,22 @@
+{
+  "format": "lattice-estimator/parameter-set",
+  "version": 2,
+  "id": "lwe-notebook",
+  "name": "LWE Notebook 参数方案",
+  "description": "从 lwe.ipynb 的活动代码迁移；注释掉的备选参数未纳入。",
+  "tags": ["migrated", "notebook", "lwe"],
+  "cases": [
+    {
+      "id": "lwe",
+      "name": "LWE",
+      "problem": {
+        "kind": "lwe",
+        "dimension": 512,
+        "modulus": "65536",
+        "samples": { "kind": "unlimited" },
+        "secret": { "kind": "sparse_ternary" },
+        "error": { "kind": "discrete_gaussian", "standard_deviation": "16" }
+      }
+    }
+  ]
+}

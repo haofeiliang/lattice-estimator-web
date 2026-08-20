@@ -1,0 +1,31 @@
+name: lattice-estimator
+
+services:
+  estimator-api:
+    image: ${LATTICE_ESTIMATOR_API_IMAGE:-lattice-estimator-api:dev}
+    platform: linux/amd64
+    environment:
+      LATTICE_ESTIMATOR_API_CONCURRENCY: "${LATTICE_ESTIMATOR_API_CONCURRENCY:-3}"
+    restart: unless-stopped
+
+  estimator-web:
+    image: ${LATTICE_ESTIMATOR_WEB_IMAGE:-lattice-estimator-web:dev}
+    build:
+      context: .
+    platform: linux/amd64
+    depends_on:
+      estimator-api:
+        condition: service_healthy
+    environment:
+      LATTICE_ESTIMATOR_API_URL: http://estimator-api:8000/
+      LATTICE_ESTIMATOR_WEB_API_TOKEN: "${LATTICE_ESTIMATOR_WEB_API_TOKEN:-}"
+      LATTICE_ESTIMATOR_WEB_CASE_CONCURRENCY: "${LATTICE_ESTIMATOR_WEB_CASE_CONCURRENCY:-2}"
+      LATTICE_ESTIMATOR_WEB_ESTIMATOR_CONCURRENCY: "${LATTICE_ESTIMATOR_API_CONCURRENCY:-3}"
+    ports:
+      - "${LATTICE_ESTIMATOR_WEB_HOST:-127.0.0.1}:${LATTICE_ESTIMATOR_WEB_PORT:-8080}:8080"
+    volumes:
+      - lattice-estimator-web-data:/var/lib/lattice-estimator-web
+    restart: unless-stopped
+
+volumes:
+  lattice-estimator-web-data:
