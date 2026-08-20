@@ -1,0 +1,10 @@
+{
+  "adapter_schema_version": 2,
+  "estimator_commit": "0000000000000000000000000000000000000000",
+  "sage_version": "ci-mock",
+  "adapter_version": "ci-mock",
+  "worker_image": "ci-mock",
+  "platform": "linux/amd64",
+  "support_matrix": {},
+  "adaptive_attacks": ["arora_gb", "bkw"]
+}

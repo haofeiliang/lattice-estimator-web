@@ -38,6 +38,23 @@ docker compose up -d --build
 
 Open <http://127.0.0.1:8080>.
 
+## Releases
+
+Pull requests run the Rust and frontend checks. Ordinary branch pushes do not
+trigger CI. Pushing a semantic-version tag builds and smoke-tests the combined
+image against a mock estimator API before publishing it to
+`ghcr.io/<repository-owner>/lattice-estimator-web`:
+
+```bash
+git tag -a v0.1.0 -m "lattice-estimator-web v0.1.0"
+git push origin v0.1.0
+```
+
+Every tag publishes its exact version and `sha-<commit>`. The highest stable
+semantic version also publishes `latest` from the same image manifest. A
+pre-release tag such as `v0.2.0-rc.1`, or a stable tag older than an existing
+release, never updates `latest`.
+
 ## File formats
 
 The maintained formats are `lattice-estimator/parameter-set` version 2 and
@@ -63,5 +80,3 @@ Copy `.env.example` to `.env` for Compose settings. Runtime variables include:
 | `LATTICE_ESTIMATOR_WEB_ESTIMATOR_CONCURRENCY` | `3` |
 | `LATTICE_ESTIMATOR_API_URL` | `http://estimator-api:8000/` |
 | `LATTICE_ESTIMATOR_WEB_URL` | `http://127.0.0.1:8080/` for the CLI |
-
-The project builds local images only and contains no registry publishing job.
