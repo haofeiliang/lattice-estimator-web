@@ -10,8 +10,8 @@ use tokio::{
 };
 
 use crate::{
-    AnalysisModel, ApplicabilityLevel, Attack, AttackCacheIdentity, AttackOutcome, AttackResult,
-    EstimateMode, EstimateRequest, EstimatorProblem, NormalizedMetric, ParameterCase, Provenance,
+    AnalysisModel, Attack, AttackCacheIdentity, AttackOutcome, AttackResult, EstimateMode,
+    EstimateRequest, EstimatorProblem, NormalizedMetric, ParameterCase, Provenance,
     SLOW_ATTACK_APPLICABILITY_RULE_VERSION, SecurityReportEntry, SecurityReportFile,
     SecuritySummary, Validate, analysis_model_for, attacks_for_problem, canonical_json,
     database::{Database, JobWork},
@@ -222,11 +222,6 @@ impl Runner {
                 if self.database.cached_outcome(&key).await?.is_some() {
                     continue;
                 }
-                if !policy.forces(*attack)
-                    && context.applicability(*attack)?.level == ApplicabilityLevel::Inapplicable
-                {
-                    continue;
-                }
                 if policy.forces(*attack) {
                     return Ok(false);
                 }
@@ -311,9 +306,7 @@ impl Runner {
             .collect::<Vec<_>>();
 
         let control = if work.request.mode == EstimateMode::Rough {
-            let slow_candidates =
-                self.apply_applicability_skips(&context, &missing_slow, &mut results)?;
-            for attack in slow_candidates {
+            for attack in missing_slow {
                 results.entry(attack).or_insert_with(|| AttackResult {
                     attack,
                     cached: false,
@@ -331,18 +324,10 @@ impl Runner {
             let (forced, automatic): (Vec<_>, Vec<_>) = missing_slow
                 .into_iter()
                 .partition(|attack| policy.forces(*attack));
-            let automatic_candidates =
-                self.apply_applicability_skips(&context, &automatic, &mut results)?;
             let mut slow_candidates = forced;
             slow_candidates.extend(
-                self.apply_preflight_skips(
-                    work,
-                    &context,
-                    automatic_candidates,
-                    policy,
-                    &mut results,
-                )
-                .await?,
+                self.apply_preflight_skips(work, &context, automatic, policy, &mut results)
+                    .await?,
             );
             if slow_candidates.is_empty() {
                 self.publish_progress(work, &context, &results, false)
@@ -472,35 +457,6 @@ impl Runner {
         }
         let entry = self.report_entry(work, context, results.clone(), fast_estimate);
         self.database.publish_job_result(&work.job_id, &entry).await
-    }
-
-    fn apply_applicability_skips(
-        &self,
-        context: &CaseContext,
-        attacks: &[Attack],
-        results: &mut BTreeMap<Attack, AttackResult>,
-    ) -> Result<Vec<Attack>, ServiceError> {
-        let mut candidates = Vec::with_capacity(attacks.len());
-        for attack in attacks {
-            let applicability = context.applicability(*attack)?;
-            if applicability.level == ApplicabilityLevel::Inapplicable {
-                results.insert(
-                    *attack,
-                    AttackResult {
-                        attack: *attack,
-                        cached: false,
-                        outcome: AttackOutcome::PolicySkipped {
-                            code: applicability.code.to_owned(),
-                            reason: applicability.reason,
-                            applicability_rule_version: SLOW_ATTACK_APPLICABILITY_RULE_VERSION,
-                        },
-                    },
-                );
-            } else {
-                candidates.push(*attack);
-            }
-        }
-        Ok(candidates)
     }
 
     async fn apply_preflight_skips(
@@ -896,13 +852,6 @@ impl Runner {
                     if code == "attack_preflight_above_threshold"
             )
         });
-        let domain_skipped = ordered.iter().any(|result| {
-            matches!(
-                &result.outcome,
-                AttackOutcome::PolicySkipped { code, .. }
-                    if code != "attack_preflight_above_threshold"
-            )
-        });
         let complete = work.request.mode == EstimateMode::Normal
             && ordered.len() == attacks_for_problem(&work.case.problem).len()
             && ordered.iter().all(|result| {
@@ -923,11 +872,6 @@ impl Runner {
                 .collect::<Vec<_>>(),
         ));
         let mut warnings = analysis_warnings(&context.analysis_model);
-        if domain_skipped {
-            warnings.push(format!(
-                "slow attacks outside the reviewed applicability domain were excluded by applicability rules v{SLOW_ATTACK_APPLICABILITY_RULE_VERSION}; completeness is relative to that policy"
-            ));
-        }
         if threshold_skipped {
             warnings.push(
                 "slow attacks were excluded because their attack-specific preflight estimates met the requested security target plus margin; completeness is relative to that preflight policy"
@@ -944,19 +888,14 @@ impl Runner {
                 .collect::<Vec<_>>()
                 .join(", ");
             warnings.push(format!(
-                "slow attacks were explicitly forced ({attacks}); applicability and fast-estimate stop rules were bypassed"
+                "slow attacks were explicitly forced ({attacks}); preflight stop rules were bypassed"
             ));
             for attack in &policy.forced_attacks {
                 let applicability = context
                     .applicability(*attack)
                     .expect("forced slow attacks have applicability rules");
-                let level = match applicability.level {
-                    ApplicabilityLevel::Applicable => "applicable",
-                    ApplicabilityLevel::Borderline => "borderline",
-                    ApplicabilityLevel::Inapplicable => "inapplicable",
-                };
                 warnings.push(format!(
-                    "policy audit for {}: {level}/{} — {}",
+                    "policy audit for {}: {} — {}",
                     slow_attack_label(*attack),
                     applicability.code,
                     applicability.reason

@@ -7,16 +7,8 @@ use crate::{Attack, ErrorDistribution, EstimatorProblem, LweProblem};
 /// Version of the reviewed slow-attack applicability rules.
 pub const SLOW_ATTACK_APPLICABILITY_RULE_VERSION: u32 = 2;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApplicabilityLevel {
-    Applicable,
-    Borderline,
-    Inapplicable,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlowAttackApplicability {
-    pub level: ApplicabilityLevel,
     pub code: &'static str,
     pub reason: String,
 }
@@ -24,7 +16,6 @@ pub struct SlowAttackApplicability {
 impl SlowAttackApplicability {
     fn applicable(code: &'static str, reason: impl Into<String>) -> Self {
         Self {
-            level: ApplicabilityLevel::Applicable,
             code,
             reason: reason.into(),
         }
@@ -125,16 +116,16 @@ mod tests {
         assert_eq!(
             slow_attack_applicability(&starved, Attack::AroraGb)
                 .unwrap()
-                .level,
-            ApplicabilityLevel::Applicable
+                .code,
+            "arora_gaussian_preflight"
         );
 
         let applicable = lwe(1024, "4096", SampleCount::Unlimited, gaussian("0.7"));
         assert_eq!(
             slow_attack_applicability(&applicable, Attack::AroraGb)
                 .unwrap()
-                .level,
-            ApplicabilityLevel::Applicable
+                .code,
+            "arora_gaussian_preflight"
         );
     }
 
@@ -144,16 +135,16 @@ mod tests {
         assert_eq!(
             slow_attack_applicability(&applicable, Attack::Bkw)
                 .unwrap()
-                .level,
-            ApplicabilityLevel::Applicable
+                .code,
+            "bkw_exact_enabled"
         );
 
         let outside = lwe(728, "2013265921", SampleCount::Unlimited, gaussian("11000"));
         assert_eq!(
             slow_attack_applicability(&outside, Attack::Bkw)
                 .unwrap()
-                .level,
-            ApplicabilityLevel::Applicable
+                .code,
+            "bkw_exact_enabled"
         );
     }
 }

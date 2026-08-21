@@ -1,7 +1,7 @@
-# Migrated parameter sets
+# Maintained parameter sets
 
 本目录保存从旧 Python 脚本和 Notebook 活动代码迁移出的
-`lattice-estimator/parameter-set` v1 文件。每个文件都是可由 Web 或
+`lattice-estimator/parameter-set` version 2 文件。每个文件都是可由 Web 或
 `POST /v1/parameter-sets/import` 直接导入的一组方案参数。
 
 旧脚本、Notebook 和 `lwe_security/` 已在迁移验证完成后删除。下表保留原

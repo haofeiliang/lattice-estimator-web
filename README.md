@@ -58,13 +58,8 @@ release, never updates `latest`.
 ## File formats
 
 The maintained formats are `lattice-estimator/parameter-set` version 2 and
-`lattice-estimator/security-report` version 2. Convert an exported v1 file
-without overwriting it:
-
-```bash
-cargo run --locked --manifest-path backend/Cargo.toml \
-  --bin lattice-estimator-migrate -- old.json > migrated.json
-```
+`lattice-estimator/security-report` version 2. Earlier experimental formats are
+not accepted or migrated.
 
 ## Configuration
 

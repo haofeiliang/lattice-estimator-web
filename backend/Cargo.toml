@@ -14,10 +14,6 @@ name = "lattice-estimator-schema"
 path = "src/bin/schema-gen.rs"
 
 [[bin]]
-name = "lattice-estimator-migrate"
-path = "src/bin/migrate.rs"
-
-[[bin]]
 name = "lattice-estimator-web"
 path = "src/main.rs"
 
