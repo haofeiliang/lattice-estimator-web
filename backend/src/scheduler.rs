@@ -1144,7 +1144,7 @@ fn reviewed_preflight_security_bits(outcome: &WorkerOutcome) -> Option<&crate::E
 fn preflight_rule_is_reviewed(metrics: &BTreeMap<String, NormalizedMetric>) -> bool {
     matches!(
         metrics.get("preflight_rule_version"),
-        Some(NormalizedMetric::Integer { value }) if value.as_bigint() == 4.into()
+        Some(NormalizedMetric::Integer { value }) if value.as_bigint() == 5.into()
     )
 }
 
@@ -1239,7 +1239,7 @@ mod tests {
         finite_bounded.samples = crate::SampleCount::Finite { count: 4096 };
         assert_eq!(
             preflight_stop_margin(&policy, Attack::AroraGb, &finite_bounded),
-            None
+            Some(bigdecimal::BigDecimal::from(10))
         );
         assert_eq!(
             preflight_stop_margin(&policy, Attack::Bkw, &finite_bounded),
@@ -1303,7 +1303,8 @@ mod tests {
         assert!(reviewed_preflight_security_bits(&outcome("1")).is_none());
         assert!(reviewed_preflight_security_bits(&outcome("2")).is_none());
         assert!(reviewed_preflight_security_bits(&outcome("3")).is_none());
-        assert!(reviewed_preflight_security_bits(&outcome("4")).is_some());
+        assert!(reviewed_preflight_security_bits(&outcome("4")).is_none());
+        assert!(reviewed_preflight_security_bits(&outcome("5")).is_some());
         let unknown = WorkerOutcome::PreflightUnknown {
             code: "bounded_search_no_finite_candidate".to_owned(),
             reason: "exact estimation is required".to_owned(),

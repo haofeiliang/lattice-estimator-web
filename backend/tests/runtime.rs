@@ -61,6 +61,7 @@ async fn reviewed_bounded_preflight_can_skip_both_slow_attacks() {
         panic!("test request must contain LWE parameters");
     };
     problem.error = lattice_estimator_web::ErrorDistribution::CenteredBinomial { eta: 8 };
+    problem.samples = lattice_estimator_web::SampleCount::Finite { count: 4096 };
     let first = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
     assert_eq!(first.0, StatusCode::ACCEPTED);
     let batch_id = first.1["batch_id"].as_str().unwrap();
@@ -668,7 +669,7 @@ async fn mock_preflight(State(state): State<MockState>, Json(request): Json<Valu
                     "kind": "computed",
                     "security_bits": state.security_bits,
                     "metrics": {
-                        "preflight_rule_version": {"kind": "integer", "value": "4"}
+                        "preflight_rule_version": {"kind": "integer", "value": "5"}
                     }
                 }
             })

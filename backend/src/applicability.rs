@@ -5,7 +5,7 @@ use num_bigint::BigInt;
 use crate::{Attack, ErrorDistribution, EstimatorProblem, LweProblem};
 
 /// Version of the reviewed slow-attack applicability rules.
-pub const SLOW_ATTACK_APPLICABILITY_RULE_VERSION: u32 = 3;
+pub const SLOW_ATTACK_APPLICABILITY_RULE_VERSION: u32 = 4;
 
 pub const ARORA_GB_PREFLIGHT_MARGIN_FLOOR_BITS: u64 = 10;
 pub const BKW_PREFLIGHT_MARGIN_FLOOR_BITS: u64 = 10;
@@ -51,10 +51,7 @@ fn arora_gb_applicability(problem: &LweProblem) -> SlowAttackApplicability {
                 ),
             )
         }
-        error
-            if matches!(problem.samples, crate::SampleCount::Unlimited)
-                && reviewed_bounded_error(error) =>
-        {
+        error if reviewed_bounded_error(error) => {
             let width = bounded_error_width(error)
                 .expect("centered-binomial and uniform-integer errors are bounded");
             SlowAttackApplicability::applicable(
@@ -106,11 +103,7 @@ fn bkw_applicability(problem: &LweProblem) -> SlowAttackApplicability {
 /// Return the per-attack uniform margin floor for a reviewed preflight domain.
 pub fn reviewed_preflight_margin_floor(problem: &LweProblem, attack: Attack) -> Option<u64> {
     match attack {
-        Attack::AroraGb
-            if matches!(&problem.error, ErrorDistribution::DiscreteGaussian { .. })
-                || (matches!(problem.samples, crate::SampleCount::Unlimited)
-                    && reviewed_bounded_error(&problem.error)) =>
-        {
+        Attack::AroraGb if reviewed_error(&problem.error) => {
             Some(ARORA_GB_PREFLIGHT_MARGIN_FLOOR_BITS)
         }
         Attack::Bkw if reviewed_error(&problem.error) => Some(BKW_PREFLIGHT_MARGIN_FLOOR_BITS),
@@ -241,7 +234,7 @@ mod tests {
             slow_attack_applicability(&finite_binomial, Attack::AroraGb)
                 .unwrap()
                 .code,
-            "arora_exact_unreviewed_error_model"
+            "arora_bounded_preflight"
         );
         assert_eq!(
             slow_attack_applicability(&finite_binomial, Attack::Bkw)
