@@ -54,7 +54,7 @@ impl Drop for Harness {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn fast_results_can_skip_slow_attacks_and_the_second_run_is_cached() {
+async fn arora_preflight_can_skip_arora_while_bkw_runs_and_is_cached() {
     let harness = harness("196", Duration::from_millis(10), None).await;
     let request = estimate_request("128");
     let first = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
@@ -62,21 +62,28 @@ async fn fast_results_can_skip_slow_attacks_and_the_second_run_is_cached() {
     let batch_id = first.1["batch_id"].as_str().unwrap();
     let completed = wait_for_terminal(&harness.app, batch_id).await;
     assert_eq!(completed["state"]["kind"], "completed");
-    assert_eq!(harness.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.calls.load(Ordering::SeqCst), 3);
     let attacks = completed["report"]["reports"][0]["attacks"]
         .as_array()
         .unwrap();
     assert_eq!(
         attacks
             .iter()
-            .filter(|item| item["outcome"]["code"] == "fast_estimate_above_threshold")
+            .filter(|item| item["outcome"]["code"] == "attack_preflight_above_threshold")
             .count(),
-        2
+        1
+    );
+    assert!(
+        harness
+            .plans
+            .lock()
+            .unwrap()
+            .contains(&vec!["bkw".to_owned()])
     );
 
     let second = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
     assert_eq!(second.0, StatusCode::OK);
-    assert_eq!(harness.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.calls.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
@@ -536,6 +543,7 @@ async fn harness(
     let worker_router = Router::new()
         .route("/v1/metadata", get(mock_metadata))
         .route("/v1/estimate", post(mock_estimate))
+        .route("/v1/preflight", post(mock_preflight))
         .with_state(worker_state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -641,6 +649,38 @@ async fn mock_estimate(State(state): State<MockState>, Json(request): Json<Value
         "schema_version": 2,
         "results": results, "duration_ms": 1,
         "provenance": { "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec", "sage_version": "10.9", "adapter_version": "2", "adapter_schema_version": 2, "worker_image": "mock-worker" }
+    }))
+}
+
+async fn mock_preflight(State(state): State<MockState>, Json(request): Json<Value>) -> Json<Value> {
+    let results = request["target_attacks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|attack| {
+            json!({
+                "attack": attack,
+                "outcome": {
+                    "kind": "computed",
+                    "security_bits": state.security_bits,
+                    "metrics": {
+                        "preflight_rule_version": {"kind": "integer", "value": "2"}
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({
+        "schema_version": 2,
+        "results": results,
+        "duration_ms": 1,
+        "provenance": {
+            "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec",
+            "sage_version": "10.9",
+            "adapter_version": "2",
+            "adapter_schema_version": 2,
+            "worker_image": "mock-worker"
+        }
     }))
 }
 

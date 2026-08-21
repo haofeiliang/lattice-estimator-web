@@ -11,7 +11,7 @@ use tokio::{
 
 use crate::{
     AnalysisModel, ApplicabilityLevel, Attack, AttackCacheIdentity, AttackOutcome, AttackResult,
-    EstimateMode, EstimateRequest, EstimatorProblem, ParameterCase, Provenance,
+    EstimateMode, EstimateRequest, EstimatorProblem, NormalizedMetric, ParameterCase, Provenance,
     SLOW_ATTACK_APPLICABILITY_RULE_VERSION, SecurityReportEntry, SecurityReportFile,
     SecuritySummary, Validate, analysis_model_for, attacks_for_problem, canonical_json,
     database::{Database, JobWork},
@@ -203,20 +203,12 @@ impl Runner {
     async fn fully_cached(&self, request: &EstimateRequest) -> Result<bool, ServiceError> {
         for case in &request.cases {
             let context = self.case_context(case)?;
-            let mut cached = BTreeMap::new();
             for attack in fast_attacks_for_problem(&case.problem) {
                 let key = context.cache_identity(*attack).hash();
                 let Some(outcome) = self.database.cached_outcome(&key).await? else {
                     return Ok(false);
                 };
-                cached.insert(
-                    *attack,
-                    AttackResult {
-                        attack: *attack,
-                        cached: true,
-                        outcome: outcome.outcome,
-                    },
-                );
+                let _ = outcome;
             }
             if request.mode == EstimateMode::Rough {
                 continue;
@@ -224,18 +216,46 @@ impl Runner {
             let policy = request.slow_attack_policy.as_ref().ok_or_else(|| {
                 ServiceError::Internal("missing validated slow attack policy".to_owned())
             })?;
+            let mut needs_preflight = Vec::new();
             for attack in slow_attacks_for_problem(&case.problem) {
                 let key = context.cache_identity(*attack).hash();
                 if self.database.cached_outcome(&key).await?.is_some() {
                     continue;
                 }
                 if !policy.forces(*attack)
-                    && (context.applicability(*attack)?.level == ApplicabilityLevel::Inapplicable
-                        || fast_results_meet_stop_threshold(&cached, policy))
+                    && context.applicability(*attack)?.level == ApplicabilityLevel::Inapplicable
                 {
                     continue;
                 }
-                return Ok(false);
+                if policy.forces(*attack) {
+                    return Ok(false);
+                }
+                if context.preflight_stop_margin(policy, *attack).is_none() {
+                    return Ok(false);
+                }
+                needs_preflight.push(*attack);
+            }
+            if !needs_preflight.is_empty() {
+                let preflight = WorkerRequest::new(
+                    context.estimator_problem.clone(),
+                    &context.resolved_analysis,
+                    needs_preflight,
+                    request.timeout_seconds.min(300),
+                );
+                let response = match self.upstream.preflight(&preflight).await {
+                    Ok(response) => response,
+                    Err(_) => return Ok(false),
+                };
+                if response.results.into_iter().any(|result| {
+                    let threshold = policy.required_security_bits.as_big_decimal()
+                        + context
+                            .preflight_stop_margin(policy, result.attack)
+                            .expect("only calibrated attacks are sent to preflight");
+                    reviewed_preflight_security_bits(&result.outcome)
+                        .is_none_or(|security_bits| security_bits.as_big_decimal() < threshold)
+                }) {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
@@ -314,28 +334,16 @@ impl Runner {
             let automatic_candidates =
                 self.apply_applicability_skips(&context, &automatic, &mut results)?;
             let mut slow_candidates = forced;
-            if fast_results_meet_stop_threshold(&results, policy) {
-                for attack in automatic_candidates {
-                    results.insert(
-                        attack,
-                        AttackResult {
-                            attack,
-                            cached: false,
-                            outcome: AttackOutcome::PolicySkipped {
-                                code: "fast_estimate_above_threshold".to_owned(),
-                                reason: format!(
-                                    "the lowest fast-attack estimate is at least the required security plus the configured {}-bit margin",
-                                    policy.stop_margin_bits
-                                ),
-                                applicability_rule_version:
-                                    SLOW_ATTACK_APPLICABILITY_RULE_VERSION,
-                            },
-                        },
-                    );
-                }
-            } else {
-                slow_candidates.extend(automatic_candidates);
-            }
+            slow_candidates.extend(
+                self.apply_preflight_skips(
+                    work,
+                    &context,
+                    automatic_candidates,
+                    policy,
+                    &mut results,
+                )
+                .await?,
+            );
             if slow_candidates.is_empty() {
                 self.publish_progress(work, &context, &results, false)
                     .await?;
@@ -490,6 +498,70 @@ impl Runner {
                 );
             } else {
                 candidates.push(*attack);
+            }
+        }
+        Ok(candidates)
+    }
+
+    async fn apply_preflight_skips(
+        &self,
+        work: &JobWork,
+        context: &CaseContext,
+        attacks: Vec<Attack>,
+        policy: &crate::SlowAttackPolicy,
+        results: &mut BTreeMap<Attack, AttackResult>,
+    ) -> Result<Vec<Attack>, ServiceError> {
+        let (preflight_attacks, mut candidates): (Vec<_>, Vec<_>) = attacks
+            .into_iter()
+            .partition(|attack| context.preflight_stop_margin(policy, *attack).is_some());
+        if preflight_attacks.is_empty() {
+            return Ok(candidates);
+        }
+        let request = WorkerRequest::new(
+            context.estimator_problem.clone(),
+            &context.resolved_analysis,
+            preflight_attacks.clone(),
+            work.request.timeout_seconds.min(300),
+        );
+        let response = match self.upstream.preflight(&request).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%error, "slow-attack preflight failed; running attacks conservatively");
+                candidates.extend(preflight_attacks);
+                return Ok(candidates);
+            }
+        };
+        for execution in response.results {
+            let effective_margin = context
+                .preflight_stop_margin(policy, execution.attack)
+                .expect("only calibrated attacks are sent to preflight");
+            let threshold = policy.required_security_bits.as_big_decimal() + &effective_margin;
+            match execution.outcome {
+                WorkerOutcome::Computed {
+                    security_bits,
+                    ref metrics,
+                } if preflight_rule_is_reviewed(metrics)
+                    && security_bits.as_big_decimal() >= threshold =>
+                {
+                    results.insert(
+                        execution.attack,
+                        AttackResult {
+                            attack: execution.attack,
+                            cached: false,
+                            outcome: AttackOutcome::PolicySkipped {
+                                code: "attack_preflight_above_threshold".to_owned(),
+                                reason: format!(
+                                    "{} preflight estimate {} bits is at least the required security plus the effective {}-bit margin",
+                                    slow_attack_label(execution.attack),
+                                    security_bits,
+                                    effective_margin
+                                ),
+                                applicability_rule_version: SLOW_ATTACK_APPLICABILITY_RULE_VERSION,
+                            },
+                        },
+                    );
+                }
+                _ => candidates.push(execution.attack),
             }
         }
         Ok(candidates)
@@ -821,14 +893,14 @@ impl Runner {
             matches!(
                 &result.outcome,
                 AttackOutcome::PolicySkipped { code, .. }
-                    if code == "fast_estimate_above_threshold"
+                    if code == "attack_preflight_above_threshold"
             )
         });
         let domain_skipped = ordered.iter().any(|result| {
             matches!(
                 &result.outcome,
                 AttackOutcome::PolicySkipped { code, .. }
-                    if code != "fast_estimate_above_threshold"
+                    if code != "attack_preflight_above_threshold"
             )
         });
         let complete = work.request.mode == EstimateMode::Normal
@@ -858,7 +930,7 @@ impl Runner {
         }
         if threshold_skipped {
             warnings.push(
-                "slow attacks were excluded because the lowest fast-attack estimate met the requested security target plus margin; completeness is relative to that policy"
+                "slow attacks were excluded because their attack-specific preflight estimates met the requested security target plus margin; completeness is relative to that preflight policy"
                     .to_owned(),
             );
         }
@@ -1028,6 +1100,17 @@ impl CaseContext {
             ServiceError::Internal("missing applicability rule for adaptive slow attack".to_owned())
         })
     }
+
+    fn preflight_stop_margin(
+        &self,
+        policy: &crate::SlowAttackPolicy,
+        attack: Attack,
+    ) -> Option<bigdecimal::BigDecimal> {
+        let EstimatorProblem::Lwe(problem) = &self.estimator_problem else {
+            return None;
+        };
+        preflight_stop_margin(policy, attack, problem)
+    }
 }
 
 fn fast_attack_groups(
@@ -1082,30 +1165,46 @@ async fn wait_for_cancel(database: &Database, batch_id: &str, job_id: &str, noti
     }
 }
 
-fn fast_results_meet_stop_threshold(
-    results: &BTreeMap<Attack, AttackResult>,
-    policy: &crate::SlowAttackPolicy,
-) -> bool {
-    results
-        .values()
-        .filter_map(|result| match &result.outcome {
-            AttackOutcome::Computed { security_bits, .. } => Some(security_bits),
-            _ => None,
-        })
-        .min_by(|left, right| left.as_big_decimal().cmp(&right.as_big_decimal()))
-        .is_some_and(|security_bits| {
-            security_bits.as_big_decimal()
-                >= policy.required_security_bits.as_big_decimal()
-                    + policy.stop_margin_bits.as_big_decimal()
-        })
-}
-
 fn slow_attack_label(attack: Attack) -> &'static str {
     match attack {
         Attack::AroraGb => "arora_gb",
         Attack::Bkw => "bkw",
         _ => unreachable!("only adaptive slow attacks have labels"),
     }
+}
+
+fn preflight_stop_margin(
+    policy: &crate::SlowAttackPolicy,
+    attack: Attack,
+    problem: &crate::LweProblem,
+) -> Option<bigdecimal::BigDecimal> {
+    let safety_floor = match (attack, &problem.error) {
+        (Attack::AroraGb, crate::ErrorDistribution::DiscreteGaussian { .. }) => 10,
+        _ => return None,
+    };
+    Some(
+        policy
+            .stop_margin_bits
+            .as_big_decimal()
+            .max(bigdecimal::BigDecimal::from(safety_floor)),
+    )
+}
+
+fn reviewed_preflight_security_bits(outcome: &WorkerOutcome) -> Option<&crate::ExactDecimal> {
+    match outcome {
+        WorkerOutcome::Computed {
+            security_bits,
+            metrics,
+        } if preflight_rule_is_reviewed(metrics) => Some(security_bits),
+        _ => None,
+    }
+}
+
+fn preflight_rule_is_reviewed(metrics: &BTreeMap<String, NormalizedMetric>) -> bool {
+    matches!(
+        metrics.get("preflight_rule_version"),
+        Some(NormalizedMetric::Integer { value }) if value.as_bigint() == 2.into()
+    )
 }
 
 fn insert_timeouts(
@@ -1158,31 +1257,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fast_estimate_threshold_includes_the_configured_margin() {
+    fn arora_preflight_margin_uses_calibrated_gaussian_domains() {
         let policy = crate::SlowAttackPolicy {
             required_security_bits: crate::ExactDecimal::new("128").unwrap(),
-            stop_margin_bits: crate::ExactDecimal::new("16").unwrap(),
+            stop_margin_bits: crate::ExactDecimal::new("4").unwrap(),
             forced_attacks: Vec::new(),
         };
-        let results = |bits: &str| {
-            BTreeMap::from([(
-                Attack::Usvp,
-                AttackResult {
-                    attack: Attack::Usvp,
-                    cached: false,
-                    outcome: AttackOutcome::Computed {
-                        security_bits: crate::ExactDecimal::new(bits).unwrap(),
-                        duration_ms: 1,
-                        metrics: BTreeMap::new(),
-                    },
-                },
-            )])
+        let problem = |sigma: &str| crate::LweProblem {
+            dimension: 1024,
+            modulus: crate::PositiveInteger::new("4096").unwrap(),
+            samples: crate::SampleCount::Unlimited,
+            secret: crate::SecretDistribution::UniformBinary,
+            error: crate::ErrorDistribution::DiscreteGaussian {
+                standard_deviation: crate::ExactDecimal::new(sigma).unwrap(),
+            },
         };
-        assert!(!fast_results_meet_stop_threshold(
-            &results("143.999"),
-            &policy
-        ));
-        assert!(fast_results_meet_stop_threshold(&results("144"), &policy));
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &problem("0.7")),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &problem("0.6")),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::Bkw, &problem("1")),
+            None
+        );
+        let mut finite_samples = problem("1");
+        finite_samples.samples = crate::SampleCount::Finite { count: 2_000_000 };
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &finite_samples),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+        let mut ternary_secret = problem("1");
+        ternary_secret.secret = crate::SecretDistribution::UniformTernary;
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &ternary_secret),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+        let mut sparse_secret = problem("1");
+        sparse_secret.secret = crate::SecretDistribution::FixedWeightBinary { hamming_weight: 64 };
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &sparse_secret),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+    }
+
+    #[test]
+    fn only_reviewed_preflight_rule_can_skip_an_exact_attack() {
+        let outcome = |version: &str| WorkerOutcome::Computed {
+            security_bits: crate::ExactDecimal::new("200").unwrap(),
+            metrics: BTreeMap::from([(
+                "preflight_rule_version".to_owned(),
+                NormalizedMetric::Integer {
+                    value: crate::SignedInteger::new(version).unwrap(),
+                },
+            )]),
+        };
+        assert!(reviewed_preflight_security_bits(&outcome("1")).is_none());
+        assert!(reviewed_preflight_security_bits(&outcome("2")).is_some());
     }
 
     #[test]

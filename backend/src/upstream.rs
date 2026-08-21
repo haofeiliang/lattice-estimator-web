@@ -42,6 +42,8 @@ impl Metadata {
 #[derive(Clone, Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<&'static str>,
     pub schema_version: u32,
     pub problem: EstimatorProblem,
     pub models: WorkerModels,
@@ -57,6 +59,7 @@ impl WorkerRequest {
         timeout_seconds: u64,
     ) -> Self {
         Self {
+            operation: None,
             schema_version: 2,
             problem,
             models: WorkerModels {
@@ -155,6 +158,23 @@ impl EstimatorClient {
             .client
             .post(url)
             .json(request)
+            .send()
+            .await
+            .map_err(|error| ServiceError::Upstream(error.to_string()))?;
+        decode(response).await
+    }
+
+    pub async fn preflight(&self, request: &WorkerRequest) -> Result<WorkerResponse, ServiceError> {
+        let url = self
+            .base_url
+            .join("v1/preflight")
+            .map_err(|error| ServiceError::Internal(error.to_string()))?;
+        let mut request = request.clone();
+        request.operation = Some("preflight");
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
             .send()
             .await
             .map_err(|error| ServiceError::Upstream(error.to_string()))?;

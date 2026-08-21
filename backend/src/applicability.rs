@@ -1,11 +1,11 @@
 //! Versioned, deterministic applicability rules for expensive LWE attacks.
 
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigInt;
 
-use crate::{Attack, ErrorDistribution, EstimatorProblem, LweProblem, SampleCount};
+use crate::{Attack, ErrorDistribution, EstimatorProblem, LweProblem};
 
 /// Version of the reviewed slow-attack applicability rules.
-pub const SLOW_ATTACK_APPLICABILITY_RULE_VERSION: u32 = 1;
+pub const SLOW_ATTACK_APPLICABILITY_RULE_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplicabilityLevel {
@@ -29,22 +29,6 @@ impl SlowAttackApplicability {
             reason: reason.into(),
         }
     }
-
-    fn borderline(code: &'static str, reason: impl Into<String>) -> Self {
-        Self {
-            level: ApplicabilityLevel::Borderline,
-            code,
-            reason: reason.into(),
-        }
-    }
-
-    fn inapplicable(code: &'static str, reason: impl Into<String>) -> Self {
-        Self {
-            level: ApplicabilityLevel::Inapplicable,
-            code,
-            reason: reason.into(),
-        }
-    }
 }
 
 /// Classify a slow attack before deciding whether Sage needs to run it.
@@ -63,43 +47,12 @@ pub fn slow_attack_applicability(
 }
 
 fn arora_gb_applicability(problem: &LweProblem) -> SlowAttackApplicability {
-    if let SampleCount::Finite { count } = problem.samples {
-        let dimension_squared = problem.dimension.checked_mul(problem.dimension);
-        if dimension_squared.is_none_or(|limit| count <= limit) {
-            return SlowAttackApplicability::inapplicable(
-                "arora_sample_starved",
-                format!(
-                    "finite sample count m={count} is not greater than n^2; Arora-GB is outside the reviewed sample-rich domain"
-                ),
-            );
-        }
-    }
-
     match &problem.error {
         ErrorDistribution::DiscreteGaussian { standard_deviation } => {
-            let sigma = standard_deviation.as_big_decimal();
-            if problem.dimension <= 256 && sigma <= 2 {
-                return SlowAttackApplicability::applicable(
-                    "arora_small_gaussian",
-                    format!(
-                        "Gaussian-like error has n={} and sigma={standard_deviation} inside the reviewed small-instance domain",
-                        problem.dimension
-                    ),
-                );
-            }
-            if problem.dimension <= 128 && sigma <= 4 {
-                return SlowAttackApplicability::borderline(
-                    "arora_gaussian_borderline",
-                    format!(
-                        "Gaussian-like error has n={} and sigma={standard_deviation} inside the conservative borderline domain",
-                        problem.dimension
-                    ),
-                );
-            }
-            SlowAttackApplicability::inapplicable(
-                "arora_gaussian_outside_domain",
+            SlowAttackApplicability::applicable(
+                "arora_gaussian_preflight",
                 format!(
-                    "Gaussian-like error has n={} and sigma={standard_deviation}, outside the reviewed small-error Arora-GB domain",
+                    "Gaussian-like error with n={} and sigma={standard_deviation} is screened by the attack-specific Arora-GB estimate",
                     problem.dimension
                 ),
             )
@@ -107,27 +60,10 @@ fn arora_gb_applicability(problem: &LweProblem) -> SlowAttackApplicability {
         error => {
             let width = bounded_error_width(error)
                 .expect("centered-binomial and uniform-integer errors are bounded");
-            if width <= BigInt::from(11) {
-                return SlowAttackApplicability::applicable(
-                    "arora_small_bounded_error",
-                    format!(
-                        "bounded error support width D={width} is inside the reviewed Arora-GB run domain"
-                    ),
-                );
-            }
-            if width <= BigInt::from(13) && problem.dimension <= 512 {
-                return SlowAttackApplicability::borderline(
-                    "arora_bounded_borderline",
-                    format!(
-                        "bounded error support width D={width} and n={} are inside the conservative borderline domain",
-                        problem.dimension
-                    ),
-                );
-            }
-            SlowAttackApplicability::inapplicable(
-                "arora_bounded_outside_domain",
+            SlowAttackApplicability::applicable(
+                "arora_bounded_exact",
                 format!(
-                    "bounded error support width D={width} and n={} are outside the reviewed Arora-GB domain",
+                    "bounded error support width D={width} and n={} use exact Arora-GB because the Gaussian preflight model does not apply",
                     problem.dimension
                 ),
             )
@@ -136,35 +72,11 @@ fn arora_gb_applicability(problem: &LweProblem) -> SlowAttackApplicability {
 }
 
 fn bkw_applicability(problem: &LweProblem) -> SlowAttackApplicability {
-    let modulus = problem.modulus.as_biguint();
-    if modulus <= BigUint::from(4_u8) {
-        return SlowAttackApplicability::applicable(
-            "bkw_very_small_modulus",
-            format!("q={modulus} is inside the reviewed LPN-like BKW domain"),
-        );
-    }
-    if modulus <= BigUint::from(16_u8) && matches!(problem.samples, SampleCount::Unlimited) {
-        return SlowAttackApplicability::applicable(
-            "bkw_small_modulus_unlimited_samples",
-            format!(
-                "q={modulus} with unlimited samples is inside the reviewed small-modulus BKW domain"
-            ),
-        );
-    }
-    if problem.dimension <= 128 && modulus <= BigUint::from(512_u16) {
-        return SlowAttackApplicability::borderline(
-            "bkw_small_parameter_borderline",
-            format!(
-                "n={} and q={modulus} are inside the conservative BKW borderline domain",
-                problem.dimension
-            ),
-        );
-    }
-    SlowAttackApplicability::inapplicable(
-        "bkw_outside_small_modulus_domain",
+    SlowAttackApplicability::applicable(
+        "bkw_exact_enabled",
         format!(
-            "n={} and q={modulus} are outside the reviewed small-modulus/LPN-like BKW domain",
-            problem.dimension
+            "n={} and q={} use exact BKW because the quick estimate is not calibrated for production skipping",
+            problem.dimension, problem.modulus
         ),
     )
 }
@@ -184,7 +96,7 @@ fn bounded_error_width(error: &ErrorDistribution) -> Option<BigInt> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExactDecimal, PositiveInteger, SecretDistribution};
+    use crate::{ExactDecimal, PositiveInteger, SampleCount, SecretDistribution};
 
     fn lwe(n: u64, q: &str, samples: SampleCount, error: ErrorDistribution) -> EstimatorProblem {
         EstimatorProblem::Lwe(LweProblem {
@@ -203,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_arora_gb_sample_error_and_borderline_domains() {
+    fn finite_samples_remain_applicable_to_arora_gb() {
         let starved = lwe(
             128,
             "256",
@@ -214,36 +126,20 @@ mod tests {
             slow_attack_applicability(&starved, Attack::AroraGb)
                 .unwrap()
                 .level,
-            ApplicabilityLevel::Inapplicable
+            ApplicabilityLevel::Applicable
         );
 
-        let applicable = lwe(256, "65536", SampleCount::Unlimited, gaussian("2"));
+        let applicable = lwe(1024, "4096", SampleCount::Unlimited, gaussian("0.7"));
         assert_eq!(
             slow_attack_applicability(&applicable, Attack::AroraGb)
                 .unwrap()
                 .level,
             ApplicabilityLevel::Applicable
         );
-
-        let borderline = lwe(128, "256", SampleCount::Unlimited, gaussian("3.2"));
-        assert_eq!(
-            slow_attack_applicability(&borderline, Attack::AroraGb)
-                .unwrap()
-                .level,
-            ApplicabilityLevel::Borderline
-        );
-
-        let outside = lwe(512, "65536", SampleCount::Unlimited, gaussian("3.2"));
-        assert_eq!(
-            slow_attack_applicability(&outside, Attack::AroraGb)
-                .unwrap()
-                .level,
-            ApplicabilityLevel::Inapplicable
-        );
     }
 
     #[test]
-    fn classifies_bkw_small_modulus_and_borderline_domains() {
+    fn bkw_remains_applicable_across_the_parameter_range() {
         let applicable = lwe(512, "4", SampleCount::Finite { count: 512 }, gaussian("1"));
         assert_eq!(
             slow_attack_applicability(&applicable, Attack::Bkw)
@@ -252,20 +148,12 @@ mod tests {
             ApplicabilityLevel::Applicable
         );
 
-        let borderline = lwe(128, "512", SampleCount::Unlimited, gaussian("3.2"));
-        assert_eq!(
-            slow_attack_applicability(&borderline, Attack::Bkw)
-                .unwrap()
-                .level,
-            ApplicabilityLevel::Borderline
-        );
-
         let outside = lwe(728, "2013265921", SampleCount::Unlimited, gaussian("11000"));
         assert_eq!(
             slow_attack_applicability(&outside, Attack::Bkw)
                 .unwrap()
                 .level,
-            ApplicabilityLevel::Inapplicable
+            ApplicabilityLevel::Applicable
         );
     }
 }
