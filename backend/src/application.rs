@@ -5,8 +5,13 @@
 //! implementation details behind these operations.
 
 use crate::{
-    EstimateRequest, ParameterSetFile, SecurityReportFile, Validate, database::Database,
-    error::ServiceError, scheduler::SchedulerHandle, service::BatchSnapshot, upstream::Metadata,
+    EstimateRequest, ParameterSetFile, SecurityReportEntry, SecurityReportFile, Validate,
+    attacks_for_problem,
+    database::Database,
+    error::ServiceError,
+    scheduler::SchedulerHandle,
+    service::{BatchSnapshot, RunState},
+    upstream::Metadata,
 };
 
 #[derive(Clone)]
@@ -22,10 +27,42 @@ pub struct Submission {
     pub snapshot: BatchSnapshot,
 }
 
-#[derive(serde::Serialize)]
-pub struct BatchRecord {
-    pub snapshot: BatchSnapshot,
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BatchSummary {
+    pub batch_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameter_set_id: Option<String>,
+    pub case_count: usize,
+    pub state: RunState,
+    pub revision: u64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CaseProgress {
+    pub case_id: String,
+    pub case_index: usize,
+    pub state: RunState,
+    pub revision: u64,
+    pub expected_attack_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<SecurityReportEntry>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BatchDetail {
+    pub batch_id: String,
+    pub state: RunState,
+    pub revision: u64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub poll_after_seconds: u64,
     pub request: EstimateRequest,
+    pub cases: Vec<CaseProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<SecurityReportFile>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -74,17 +111,63 @@ impl Application {
         })
     }
 
-    pub async fn batch(&self, id: &str) -> Result<BatchSnapshot, ServiceError> {
-        self.database.batch(id, self.poll_after_seconds).await
+    pub async fn batch(&self, id: &str) -> Result<BatchDetail, ServiceError> {
+        let (snapshot, request, jobs) = self
+            .database
+            .batch_detail(id, self.poll_after_seconds)
+            .await?;
+        let cases = jobs
+            .into_iter()
+            .map(|job| {
+                let parameter = request.cases.get(job.case_index).ok_or_else(|| {
+                    ServiceError::Internal(format!(
+                        "job '{}' refers to missing case index {}",
+                        job.case_id, job.case_index
+                    ))
+                })?;
+                Ok(CaseProgress {
+                    case_id: job.case_id,
+                    case_index: job.case_index,
+                    state: job.state,
+                    revision: job.revision,
+                    expected_attack_count: attacks_for_problem(&parameter.problem).len(),
+                    result: job.result,
+                })
+            })
+            .collect::<Result<Vec<_>, ServiceError>>()?;
+        Ok(BatchDetail {
+            batch_id: snapshot.batch_id,
+            state: snapshot.state,
+            revision: snapshot.revision,
+            created_at: snapshot.created_at,
+            updated_at: snapshot.updated_at,
+            poll_after_seconds: snapshot.poll_after_seconds,
+            request,
+            cases,
+            report: snapshot.report,
+        })
     }
 
-    pub async fn batches(&self) -> Result<Vec<BatchRecord>, ServiceError> {
+    pub async fn batches(&self) -> Result<Vec<BatchSummary>, ServiceError> {
         Ok(self
             .database
-            .list_batches_with_requests(200, self.poll_after_seconds)
+            .list_batch_headers(200)
             .await?
             .into_iter()
-            .map(|(snapshot, request)| BatchRecord { snapshot, request })
+            .map(|header| BatchSummary {
+                batch_id: header.batch_id,
+                name: header
+                    .request
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| default_run_name(&header.request)),
+                parameter_set_id: header.request.parameter_set_id.clone(),
+                case_count: header.request.cases.len(),
+                state: header.state,
+                revision: header.revision,
+                created_at: header.created_at,
+                updated_at: header.updated_at,
+            })
             .collect())
     }
 
@@ -97,13 +180,23 @@ impl Application {
     }
 
     pub async fn report(&self, id: &str) -> Result<SecurityReportFile, ServiceError> {
-        self.batch(id).await?.report.ok_or_else(|| {
+        let detail = self.batch(id).await?;
+        if !detail.state.terminal() {
+            return Err(ServiceError::Conflict(
+                "batch is still running and has no exportable final report".to_owned(),
+            ));
+        }
+        detail.report.ok_or_else(|| {
             ServiceError::Conflict("batch does not have an exportable report yet".to_owned())
         })
     }
 
     pub async fn delete_batch(&self, id: String) -> Result<(), ServiceError> {
-        self.database.delete_batches(vec![id]).await
+        self.delete_batches(vec![id]).await
+    }
+
+    pub async fn delete_batches(&self, ids: Vec<String>) -> Result<(), ServiceError> {
+        self.database.delete_batches(ids).await
     }
 
     pub async fn parameter_sets(&self) -> Result<Vec<ParameterSetSummary>, ServiceError> {
@@ -124,6 +217,18 @@ impl Application {
     }
 
     pub async fn delete_parameter_set(&self, id: &str) -> Result<(), ServiceError> {
-        self.database.delete_parameter_set(id).await
+        self.delete_parameter_sets(vec![id.to_owned()]).await
+    }
+
+    pub async fn delete_parameter_sets(&self, ids: Vec<String>) -> Result<(), ServiceError> {
+        self.database.delete_parameter_sets(ids).await
+    }
+}
+
+fn default_run_name(request: &EstimateRequest) -> String {
+    match request.cases.as_slice() {
+        [case] => case.name.clone(),
+        [first, rest @ ..] => format!("{} 等 {} 个 cases", first.name, rest.len() + 1),
+        [] => "未命名批次".to_owned(),
     }
 }

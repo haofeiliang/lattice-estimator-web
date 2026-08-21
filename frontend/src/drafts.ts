@@ -34,9 +34,15 @@ export type CaseDraft = {
   analysis: Record<string, unknown>;
 };
 
+export function freshIdentifier(prefix: 'case' | 'scheme'): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(12));
+  const suffix = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${prefix}-${suffix}`;
+}
+
 export function freshDraft(index: number): CaseDraft {
   return {
-    id: `case-${index}`,
+    id: freshIdentifier('case'),
     name: `参数 ${index}`,
     description: '',
     tags: '',
@@ -65,6 +71,14 @@ export function freshDraft(index: number): CaseDraft {
     securityModel: 'classical',
     analysis: {},
   };
+}
+
+export function appendFreshDraft(drafts: CaseDraft[]): CaseDraft[] {
+  let draft: CaseDraft;
+  do {
+    draft = freshDraft(drafts.length + 1);
+  } while (drafts.some(existing => existing.id === draft.id));
+  return [...drafts, draft];
 }
 
 export function draftFromCase(parameter: ParameterCase): CaseDraft {

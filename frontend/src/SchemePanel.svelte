@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import CaseEditor from './CaseEditor.svelte';
-  import { api, download } from './api';
-  import { caseFromDraft, commaList, draftFromCase, freshDraft } from './drafts';
+  import { api, ApiError, download } from './api';
+  import { appendFreshDraft, caseFromDraft, commaList, draftFromCase, freshDraft, freshIdentifier } from './drafts';
   import type { CaseDraft } from './drafts';
   import type { EstimateRequest, ParameterSet, ParameterSetSummary } from './types';
 
   let items: ParameterSetSummary[] = [];
   let selected = '';
+  let checkedIds = new Set<string>();
   let setId = '';
   let setName = '';
   let description = '';
@@ -22,9 +23,45 @@
   let busy = false;
   let message = '';
   let messageIsError = false;
+  let generatedSetId = false;
+  $: allItemsChecked = items.length > 0 && items.every(item => checkedIds.has(item.id));
 
   async function refresh() {
     items = await api('/v1/parameter-sets');
+    const available = new Set(items.map(item => item.id));
+    checkedIds = new Set([...checkedIds].filter(id => available.has(id)));
+  }
+
+  function toggleChecked(id: string) {
+    const next = new Set(checkedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    checkedIds = next;
+  }
+
+  function toggleAll() {
+    checkedIds = allItemsChecked ? new Set() : new Set(items.map(item => item.id));
+  }
+
+  async function removeChecked() {
+    const ids = [...checkedIds];
+    if (!ids.length || !confirm(`删除选中的 ${ids.length} 个方案？历史报告不会被删除。`)) return;
+    busy = true;
+    clearMessage();
+    try {
+      await api('/v1/parameter-sets/bulk-delete', {
+        method: 'POST',
+        body: JSON.stringify({ ids }),
+      });
+      checkedIds = new Set();
+      if (ids.includes(selected)) reset();
+      await refresh();
+      showMessage(`已删除 ${ids.length} 个方案；历史报告保持不变`);
+    } catch (error) {
+      showError(error);
+    } finally {
+      busy = false;
+    }
   }
 
   async function open(id: string) {
@@ -40,6 +77,7 @@
   }
 
   function load(value: ParameterSet, sourceId = '') {
+    generatedSetId = false;
     selected = sourceId;
     setId = value.id;
     setName = value.name;
@@ -86,11 +124,24 @@
     busy = true;
     clearMessage();
     try {
-      await api('/v1/parameter-sets/import?conflict=replace', {
-        method: 'POST',
-        body: JSON.stringify(value()),
-      });
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const replace = Boolean(selected) || !generatedSetId;
+          await api(`/v1/parameter-sets/import?conflict=${replace ? 'replace' : 'reject'}`, {
+            method: 'POST',
+            body: JSON.stringify(value()),
+          });
+          break;
+        } catch (error) {
+          if (generatedSetId && error instanceof ApiError && error.status === 409 && attempt < 4) {
+            setId = freshIdentifier('scheme');
+            continue;
+          }
+          throw error;
+        }
+      }
       selected = setId;
+      generatedSetId = false;
       await refresh();
       showMessage('修改已保存为方案的新版本，历史报告中的参数快照保持不变');
     } catch (error) {
@@ -148,7 +199,8 @@
 
   function create() {
     selected = '';
-    setId = 'new-scheme';
+    setId = freshIdentifier('scheme');
+    generatedSetId = true;
     setName = 'New scheme';
     description = '';
     tags = '';
@@ -157,6 +209,7 @@
   }
 
   function reset() {
+    generatedSetId = false;
     selected = '';
     setId = '';
     setName = '';
@@ -195,11 +248,22 @@
         <label class="file-button">导入<input type="file" accept="application/json" on:change={importFile} /></label>
       </div>
     </header>
+    {#if items.length > 0}
+      <div class="bulk-toolbar">
+        <button class="ghost" disabled={busy} on:click={toggleAll}>{allItemsChecked ? '取消全选' : '全选'}</button>
+        <button class="danger" disabled={busy || checkedIds.size === 0} on:click={removeChecked}>{busy ? '处理中…' : `删除所选 (${checkedIds.size})`}</button>
+      </div>
+    {/if}
     {#if items.length === 0}<p class="empty">还没有保存的方案。</p>{/if}
     {#each items as item}
-      <button class:selected={selected === item.id} class="list-item" on:click={() => open(item.id)}>
-        <strong>{item.name}</strong><span>{item.id} · v{item.version} · {item.case_count} cases</span>
-      </button>
+      <div class="selectable-list-row">
+        <label class="list-check">
+          <input type="checkbox" checked={checkedIds.has(item.id)} on:change={() => toggleChecked(item.id)} aria-label={`选择方案 ${item.name}`} />
+        </label>
+        <button class:selected={selected === item.id} class="list-item" on:click={() => open(item.id)}>
+          <strong>{item.name}</strong><span>{item.id} · v{item.version} · {item.case_count} cases</span>
+        </button>
+      </div>
     {/each}
   </aside>
 
@@ -215,12 +279,12 @@
 
       <section class="scheme-meta">
         <div class="form-grid">
-          <label>方案 ID<input bind:value={setId} disabled={Boolean(selected)} /></label>
+          <label>方案 ID（自动生成）<input bind:value={setId} readonly /></label>
           <label>方案名称<input bind:value={setName} /></label>
           <label>标签<input bind:value={tags} placeholder="逗号分隔" /></label>
           <label>说明<input bind:value={description} placeholder="可选" /></label>
         </div>
-        {#if selected}<p class="hint">方案 ID 是稳定身份，不能在编辑时修改。保存会原子创建新版本；历史报告仍保留运行时参数快照。</p>{/if}
+        <p class="hint">方案 ID 是自动生成的稳定身份，不会随名称改变。保存会原子创建新版本；历史报告仍保留运行时参数快照。</p>
       </section>
 
       <div class="case-list scheme-cases">
@@ -233,7 +297,7 @@
           />
         {/each}
       </div>
-      <button class="add-case" on:click={() => drafts = [...drafts, freshDraft(drafts.length + 1)]}>＋ 添加一组参数</button>
+      <button class="add-case" on:click={() => drafts = appendFreshDraft(drafts)}>＋ 添加一组参数</button>
 
       <section class="run-options embedded-options">
         <div class="option-heading">

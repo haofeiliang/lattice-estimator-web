@@ -3,8 +3,8 @@ use std::{path::PathBuf, sync::Arc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    SecurityReportFile, application::Application, database::Database, error::ServiceError,
-    scheduler::Scheduler, upstream::EstimatorClient,
+    SecurityReportEntry, SecurityReportFile, application::Application, database::Database,
+    error::ServiceError, scheduler::Scheduler, upstream::EstimatorClient,
 };
 
 pub const MAX_QUEUED_JOBS: usize = 2_000;
@@ -158,6 +158,7 @@ pub(crate) struct JobSnapshot {
     pub attempts: u32,
     pub created_at: String,
     pub updated_at: String,
+    pub result: Option<SecurityReportEntry>,
 }
 
 #[derive(Clone)]

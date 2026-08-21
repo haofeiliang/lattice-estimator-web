@@ -39,6 +39,16 @@ pub struct CachedOutcome {
     pub outcome: AttackOutcome,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct BatchHeader {
+    pub batch_id: String,
+    pub request: EstimateRequest,
+    pub state: RunState,
+    pub revision: u64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 impl Database {
     pub fn open(path: &Path) -> DbResult<Self> {
         if let Some(parent) = path
@@ -159,30 +169,64 @@ impl Database {
             .await
     }
 
-    pub async fn list_batches_with_requests(
+    pub(crate) async fn batch_detail(
         &self,
-        limit: usize,
+        batch_id: &str,
         poll_after_seconds: u64,
-    ) -> DbResult<Vec<(BatchSnapshot, EstimateRequest)>> {
+    ) -> DbResult<(BatchSnapshot, EstimateRequest, Vec<JobSnapshot>)> {
+        let batch_id = batch_id.to_owned();
+        self.call(move |connection| {
+            let batch = load_batch(connection, &batch_id, poll_after_seconds)?;
+            let request_json: String = connection
+                .query_row(
+                    "SELECT request_json FROM batches WHERE id=?1",
+                    [&batch_id],
+                    |row| row.get(0),
+                )
+                .map_err(ServiceError::database)?;
+            let jobs = batch
+                .job_ids
+                .iter()
+                .map(|job_id| load_job(connection, job_id))
+                .collect::<DbResult<Vec<_>>>()?;
+            Ok((batch, from_json(&request_json)?, jobs))
+        })
+        .await
+    }
+
+    pub(crate) async fn list_batch_headers(&self, limit: usize) -> DbResult<Vec<BatchHeader>> {
         self.call(move |connection| {
             let mut statement = connection
-                .prepare("SELECT id,request_json FROM batches ORDER BY updated_at DESC LIMIT ?1")
+                .prepare(
+                    "SELECT id,request_json,state_json,revision,created_at,updated_at FROM batches ORDER BY updated_at DESC LIMIT ?1",
+                )
                 .map_err(ServiceError::database)?;
-            let rows = statement
+            statement
                 .query_map(
                     [i64::try_from(limit).map_err(ServiceError::database)?],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    },
                 )
                 .map_err(ServiceError::database)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(ServiceError::database)?;
-            drop(statement);
-            rows.into_iter()
-                .map(|(id, request)| {
-                    Ok((
-                        load_batch(connection, &id, poll_after_seconds)?,
-                        from_json(&request)?,
-                    ))
+                .map(|row| {
+                    let (batch_id, request, state, revision, created_at, updated_at) =
+                        row.map_err(ServiceError::database)?;
+                    Ok(BatchHeader {
+                        batch_id,
+                        request: from_json(&request)?,
+                        state: from_json(&state)?,
+                        revision: u64::try_from(revision).map_err(ServiceError::database)?,
+                        created_at,
+                        updated_at,
+                    })
                 })
                 .collect()
         })
@@ -263,7 +307,7 @@ impl Database {
                 .map_err(ServiceError::database)?;
             transaction
                 .execute(
-                    "UPDATE batches SET state_kind='running',state_json=?2,revision=revision+1,updated_at=?3 WHERE id=?1 AND state_kind='queued'",
+                    "UPDATE batches SET state_kind=CASE WHEN state_kind='queued' THEN 'running' ELSE state_kind END,state_json=CASE WHEN state_kind='queued' THEN ?2 ELSE state_json END,revision=revision+1,updated_at=?3 WHERE id=?1",
                     params![batch_id, json(&state)?, timestamp],
                 )
                 .map_err(ServiceError::database)?;
@@ -293,19 +337,73 @@ impl Database {
     ) -> DbResult<()> {
         let job_id = job_id.to_owned();
         self.call(move |connection| {
+            let transaction = connection.transaction().map_err(ServiceError::database)?;
             let timestamp = now();
-            connection
+            let batch_id: String = transaction
+                .query_row(
+                    "SELECT batch_id FROM jobs WHERE id=?1",
+                    [&job_id],
+                    |row| row.get(0),
+                )
+                .map_err(ServiceError::database)?;
+            transaction
                 .execute(
                     "UPDATE jobs SET state_kind=?2,state_json=?3,result_json=?4,revision=revision+1,updated_at=?5 WHERE id=?1",
                     params![job_id, state.kind(), json(&state)?, result.as_ref().map(json).transpose()?, timestamp],
                 )
                 .map_err(ServiceError::database)?;
-            connection
+            transaction
                 .execute(
                     "UPDATE execution_attempts SET state_kind=?2,finished_at=?3 WHERE job_id=?1 AND finished_at IS NULL",
                     params![job_id, state.kind(), timestamp],
                 )
                 .map_err(ServiceError::database)?;
+            transaction
+                .execute(
+                    "UPDATE batches SET revision=revision+1,updated_at=?2 WHERE id=?1",
+                    params![batch_id, timestamp],
+                )
+                .map_err(ServiceError::database)?;
+            transaction.commit().map_err(ServiceError::database)?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn publish_job_result(
+        &self,
+        job_id: &str,
+        result: &SecurityReportEntry,
+    ) -> DbResult<()> {
+        let job_id = job_id.to_owned();
+        let result = json(result)?;
+        self.call(move |connection| {
+            let transaction = connection.transaction().map_err(ServiceError::database)?;
+            let batch_id: String = transaction
+                .query_row(
+                    "SELECT batch_id FROM jobs WHERE id=?1",
+                    [&job_id],
+                    |row| row.get(0),
+                )
+                .map_err(ServiceError::database)?;
+            let timestamp = now();
+            let updated = transaction
+                .execute(
+                    "UPDATE jobs SET result_json=?2,revision=revision+1,updated_at=?3 WHERE id=?1 AND state_kind='running'",
+                    params![job_id, result, timestamp],
+                )
+                .map_err(ServiceError::database)?;
+            if updated == 0 {
+                transaction.commit().map_err(ServiceError::database)?;
+                return Ok(());
+            }
+            transaction
+                .execute(
+                    "UPDATE batches SET revision=revision+1,updated_at=?2 WHERE id=?1",
+                    params![batch_id, timestamp],
+                )
+                .map_err(ServiceError::database)?;
+            transaction.commit().map_err(ServiceError::database)?;
             Ok(())
         })
         .await
@@ -315,22 +413,37 @@ impl Database {
         let job_id = job_id.to_owned();
         let reason = reason.to_owned();
         self.call(move |connection| {
+            let transaction = connection.transaction().map_err(ServiceError::database)?;
             let timestamp = now();
             let state = RunState::Queued {
                 queued_at: timestamp.clone(),
             };
-            connection
+            let batch_id: String = transaction
+                .query_row(
+                    "SELECT batch_id FROM jobs WHERE id=?1",
+                    [&job_id],
+                    |row| row.get(0),
+                )
+                .map_err(ServiceError::database)?;
+            transaction
                 .execute(
-                    "UPDATE jobs SET state_kind='queued',state_json=?2,revision=revision+1,updated_at=?3 WHERE id=?1",
+                    "UPDATE jobs SET state_kind='queued',state_json=?2,result_json=NULL,revision=revision+1,updated_at=?3 WHERE id=?1",
                     params![job_id, json(&state)?, timestamp],
                 )
                 .map_err(ServiceError::database)?;
-            connection
+            transaction
                 .execute(
                     "UPDATE execution_attempts SET state_kind='interrupted',finished_at=?2,error_json=?3 WHERE job_id=?1 AND finished_at IS NULL",
                     params![job_id, timestamp, json(&serde_json::json!({"reason": reason}))?],
                 )
                 .map_err(ServiceError::database)?;
+            transaction
+                .execute(
+                    "UPDATE batches SET revision=revision+1,updated_at=?2 WHERE id=?1",
+                    params![batch_id, timestamp],
+                )
+                .map_err(ServiceError::database)?;
+            transaction.commit().map_err(ServiceError::database)?;
             Ok(())
         })
         .await
@@ -596,25 +709,30 @@ impl Database {
         }).await
     }
 
-    pub async fn delete_parameter_set(&self, external_id: &str) -> DbResult<()> {
-        let external_id = external_id.to_owned();
+    pub async fn delete_parameter_sets(&self, external_ids: Vec<String>) -> DbResult<()> {
         self.call(move |connection| {
             let transaction = connection.transaction().map_err(ServiceError::database)?;
-            let deleted = transaction
-                .execute(
-                    "DELETE FROM parameter_set_heads WHERE external_id=?1",
-                    [&external_id],
-                )
-                .map_err(ServiceError::database)?;
-            if deleted == 0 {
-                return Err(ServiceError::NotFound("parameter set not found".to_owned()));
+            for external_id in &external_ids {
+                let deleted = transaction
+                    .execute(
+                        "DELETE FROM parameter_set_heads WHERE external_id=?1",
+                        [external_id],
+                    )
+                    .map_err(ServiceError::database)?;
+                if deleted == 0 {
+                    return Err(ServiceError::NotFound(format!(
+                        "parameter set '{external_id}' not found"
+                    )));
+                }
             }
-            transaction
-                .execute(
-                    "DELETE FROM parameter_sets WHERE external_id=?1",
-                    [&external_id],
-                )
-                .map_err(ServiceError::database)?;
+            for external_id in &external_ids {
+                transaction
+                    .execute(
+                        "DELETE FROM parameter_sets WHERE external_id=?1",
+                        [external_id],
+                    )
+                    .map_err(ServiceError::database)?;
+            }
             transaction.commit().map_err(ServiceError::database)?;
             Ok(())
         })
@@ -741,11 +859,11 @@ fn initialize(connection: Connection) -> DbResult<Connection> {
         params![json(&cancelled)?, timestamp],
     ).map_err(ServiceError::database)?;
     connection.execute(
-        "UPDATE jobs SET state_kind='queued',state_json=?1,revision=revision+1,updated_at=?2 WHERE state_kind='running' AND attempts < 2",
+        "UPDATE jobs SET state_kind='queued',state_json=?1,result_json=NULL,revision=revision+1,updated_at=?2 WHERE state_kind='running' AND attempts < 2",
         params![json(&queued)?, timestamp],
     ).map_err(ServiceError::database)?;
     connection.execute(
-        "UPDATE jobs SET state_kind='interrupted',state_json=?1,revision=revision+1,updated_at=?2 WHERE state_kind='running'",
+        "UPDATE jobs SET state_kind='interrupted',state_json=?1,result_json=NULL,revision=revision+1,updated_at=?2 WHERE state_kind='running'",
         params![json(&interrupted)?, timestamp],
     ).map_err(ServiceError::database)?;
     connection.execute(
@@ -803,9 +921,9 @@ fn load_batch(
 
 fn load_job(connection: &Connection, job_id: &str) -> DbResult<JobSnapshot> {
     let row = connection.query_row(
-        "SELECT batch_id,case_id,case_index,state_json,revision,attempts,created_at,updated_at FROM jobs WHERE id=?1",
+        "SELECT batch_id,case_id,case_index,state_json,revision,attempts,created_at,updated_at,result_json FROM jobs WHERE id=?1",
         [job_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?)),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?)),
     ).optional().map_err(ServiceError::database)?
         .ok_or_else(|| ServiceError::NotFound("job not found".to_owned()))?;
     Ok(JobSnapshot {
@@ -818,6 +936,7 @@ fn load_job(connection: &Connection, job_id: &str) -> DbResult<JobSnapshot> {
         attempts: u32::try_from(row.5).map_err(ServiceError::database)?,
         created_at: row.6,
         updated_at: row.7,
+        result: row.8.map(|value| from_json(&value)).transpose()?,
     })
 }
 

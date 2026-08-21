@@ -32,7 +32,7 @@
   <dl>
     {#if problem.kind === 'rlwe' || problem.kind === 'glwe'}
       {#if problem.kind === 'glwe'}<div><dt>GLWE 维数 k</dt><dd>{problem.dimension}</dd></div>{/if}
-      <div><dt>环维数 N</dt><dd>{problem.negacyclic_ring?.polynomial_degree}</dd></div>
+      <div><dt>多项式长度 N</dt><dd>{problem.negacyclic_ring?.polynomial_degree}</dd></div>
       <div><dt>模数 q</dt><dd>{problem.negacyclic_ring?.ciphertext_modulus}</dd></div>
       <div><dt>环样本数</dt><dd>{samples()}</dd></div>
       <div class="wide"><dt>私钥分布</dt><dd>{distribution(problem.secret)}</dd></div>
@@ -44,10 +44,10 @@
       <div><dt>范数</dt><dd>{problem.norm}</dd></div>
       <div><dt>长度界 β</dt><dd>{problem.length_bound}</dd></div>
     {:else}
-      <div><dt>维数 n</dt><dd>{problem.dimension}</dd></div>
+      <div><dt>{problem.kind === 'ntru' ? (problem.structure === 'circulant' ? '多项式长度 N' : '矩阵维数 n') : '维数 n'}</dt><dd>{problem.dimension}</dd></div>
       <div><dt>模数 q</dt><dd>{problem.modulus}</dd></div>
       {#if problem.kind === 'lwe'}<div><dt>样本数</dt><dd>{samples()}</dd></div>{/if}
-      {#if problem.kind === 'ntru'}<div><dt>结构</dt><dd>{problem.structure}</dd></div>{/if}
+      {#if problem.kind === 'ntru'}<div><dt>结构</dt><dd>{problem.structure === 'circulant' ? '多项式（循环矩阵）' : '一般矩阵'}</dd></div>{/if}
       <div class="wide"><dt>私钥分布</dt><dd>{distribution(problem.secret)}</dd></div>
       <div class="wide"><dt>噪声分布</dt><dd>{distribution(problem.error)}</dd></div>
     {/if}

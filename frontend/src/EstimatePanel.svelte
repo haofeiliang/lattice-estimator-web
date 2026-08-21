@@ -1,7 +1,7 @@
 <script lang="ts">
   import CaseEditor from './CaseEditor.svelte';
-  import { api } from './api';
-  import { caseFromDraft, freshDraft } from './drafts';
+  import { api, ApiError } from './api';
+  import { appendFreshDraft, caseFromDraft, freshDraft, freshIdentifier } from './drafts';
   import type { CaseDraft } from './drafts';
   import type { EstimateRequest, ParameterSet } from './types';
 
@@ -12,10 +12,11 @@
   let marginBits = '16';
   let forceAroraGb = false;
   let forceBkw = false;
-  let setId = 'my-scheme';
+  let setId = freshIdentifier('scheme');
   let setName = 'My scheme';
   let busy = false;
   let message = '';
+  let savedSetId = false;
 
   function request(): EstimateRequest {
     const forcedAttacks: Array<'arora_gb' | 'bkw'> = [];
@@ -45,12 +46,26 @@
 
   async function save() {
     busy = true; message = '';
-    const value: ParameterSet = {
-      format: 'lattice-estimator/parameter-set', version: 2, id: setId, name: setName,
-      tags: [], cases: drafts.map(caseFromDraft)
-    };
     try {
-      await api('/v1/parameter-sets/import?conflict=replace', { method: 'POST', body: JSON.stringify(value) });
+      for (let attempt = 0; ; attempt += 1) {
+        const value: ParameterSet = {
+          format: 'lattice-estimator/parameter-set', version: 2, id: setId, name: setName,
+          tags: [], cases: drafts.map(caseFromDraft)
+        };
+        try {
+          await api(`/v1/parameter-sets/import?conflict=${savedSetId ? 'replace' : 'reject'}`, {
+            method: 'POST', body: JSON.stringify(value)
+          });
+          break;
+        } catch (error) {
+          if (!savedSetId && error instanceof ApiError && error.status === 409 && attempt < 4) {
+            setId = freshIdentifier('scheme');
+            continue;
+          }
+          throw error;
+        }
+      }
+      savedSetId = true;
       message = `方案 ${setId} 已保存`;
     } catch (error) { message = String(error); }
     finally { busy = false; }
@@ -80,7 +95,7 @@
   {/each}
 </div>
 
-<button class="add-case" on:click={() => drafts = [...drafts, freshDraft(drafts.length + 1)]}>＋ 添加一组参数</button>
+<button class="add-case" on:click={() => drafts = appendFreshDraft(drafts)}>＋ 添加一组参数</button>
 
 <section class="panel run-options">
   <div class="form-grid compact">
@@ -89,7 +104,7 @@
       <label>目标安全 bit<input bind:value={requiredBits} /></label>
       <label>慢攻击跳过余量<input bind:value={marginBits} /></label>
     {/if}
-    <label>方案 ID<input bind:value={setId} /></label>
+    <label>方案 ID（自动生成）<input bind:value={setId} readonly /></label>
     <label>方案名称<input bind:value={setName} /></label>
   </div>
   {#if mode === 'normal'}

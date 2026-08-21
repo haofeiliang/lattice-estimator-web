@@ -68,15 +68,36 @@ export type ReportEntry = {
   attacks: AttackResult[];
 };
 
-export type BatchSnapshot = {
+export type CaseProgress = {
+  case_id: string;
+  case_index: number;
+  state: RunState;
+  revision: number;
+  expected_attack_count: number;
+  result?: ReportEntry;
+};
+
+export type BatchSummary = {
+  batch_id: string;
+  name: string;
+  parameter_set_id?: string;
+  case_count: number;
+  state: RunState;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BatchDetail = {
   batch_id: string;
   state: RunState;
   revision: number;
   created_at: string;
   updated_at: string;
   poll_after_seconds: number;
+  request: EstimateRequest;
+  cases: CaseProgress[];
   report?: { reports: ReportEntry[] };
 };
 
-export type BatchRecord = { snapshot: BatchSnapshot; request: EstimateRequest };
 export type ParameterSetSummary = { id: string; name: string; version: number; case_count: number; created_at: string };

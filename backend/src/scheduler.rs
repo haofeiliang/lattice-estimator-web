@@ -263,12 +263,14 @@ impl Runner {
                 );
             }
         }
+        self.publish_progress(work, &context, &results, false)
+            .await?;
 
         let fast_plans = fast_attack_groups(&work.case.problem, &results);
         let mut fast_estimate = false;
         if !fast_plans.is_empty() {
             let execution = self
-                .run_plans(work, &context, fast_plans, deadline, cancellation)
+                .run_plans(work, &context, fast_plans, deadline, cancellation, &results)
                 .await?;
             results.extend(execution.results);
             match execution.control {
@@ -335,14 +337,18 @@ impl Runner {
                 slow_candidates.extend(automatic_candidates);
             }
             if slow_candidates.is_empty() {
+                self.publish_progress(work, &context, &results, false)
+                    .await?;
                 WorkerControl::Completed
             } else {
+                self.publish_progress(work, &context, &results, false)
+                    .await?;
                 let plans = slow_candidates
                     .into_iter()
                     .map(|attack| vec![attack])
                     .collect();
                 let execution = self
-                    .run_plans(work, &context, plans, deadline, cancellation)
+                    .run_plans(work, &context, plans, deadline, cancellation, &results)
                     .await?;
                 results.extend(execution.results);
                 execution.control
@@ -375,6 +381,7 @@ impl Runner {
         plans: Vec<Vec<Attack>>,
         deadline: tokio::time::Instant,
         cancellation: &Arc<Notify>,
+        prior_results: &BTreeMap<Attack, AttackResult>,
     ) -> Result<PlanExecution, ServiceError> {
         let mut tasks = JoinSet::new();
         for targets in plans {
@@ -409,8 +416,12 @@ impl Runner {
                         attacks = ?targets,
                         "estimator plan failed after retry"
                     );
-                    insert_plan_failures(&targets, &error, &mut results);
-                    continue;
+                    let mut failures = BTreeMap::new();
+                    insert_plan_failures(&targets, &error, &mut failures);
+                    PlanExecution {
+                        control: WorkerControl::Completed,
+                        results: failures,
+                    }
                 }
                 Ok((_, Err(error))) => {
                     tasks.shutdown().await;
@@ -424,6 +435,10 @@ impl Runner {
                 }
             };
             results.extend(execution.results);
+            let mut progress = prior_results.clone();
+            progress.extend(results.clone());
+            self.publish_progress(work, context, &progress, false)
+                .await?;
             control = match (control, execution.control) {
                 (WorkerControl::Cancelled, _) | (_, WorkerControl::Cancelled) => {
                     WorkerControl::Cancelled
@@ -435,6 +450,20 @@ impl Runner {
             };
         }
         Ok(PlanExecution { control, results })
+    }
+
+    async fn publish_progress(
+        &self,
+        work: &JobWork,
+        context: &CaseContext,
+        results: &BTreeMap<Attack, AttackResult>,
+        fast_estimate: bool,
+    ) -> Result<(), ServiceError> {
+        if results.is_empty() {
+            return Ok(());
+        }
+        let entry = self.report_entry(work, context, results.clone(), fast_estimate);
+        self.database.publish_job_result(&work.job_id, &entry).await
     }
 
     fn apply_applicability_skips(

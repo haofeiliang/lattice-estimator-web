@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -27,6 +28,9 @@ struct MockState {
     active: Arc<AtomicUsize>,
     max_active: Arc<AtomicUsize>,
     plans: Arc<Mutex<Vec<Vec<String>>>>,
+    plan_delays: Arc<Mutex<HashMap<String, Duration>>>,
+    dimension_delays: Arc<Mutex<HashMap<u64, Duration>>>,
+    retryable_failures: Arc<Mutex<HashMap<String, usize>>>,
     delay: Duration,
     security_bits: &'static str,
 }
@@ -36,6 +40,9 @@ struct Harness {
     calls: Arc<AtomicUsize>,
     max_active: Arc<AtomicUsize>,
     plans: Arc<Mutex<Vec<Vec<String>>>>,
+    plan_delays: Arc<Mutex<HashMap<String, Duration>>>,
+    dimension_delays: Arc<Mutex<HashMap<u64, Duration>>>,
+    retryable_failures: Arc<Mutex<HashMap<String, usize>>>,
     _directory: TempDir,
     worker: tokio::task::JoinHandle<()>,
 }
@@ -133,6 +140,180 @@ async fn low_fast_result_runs_independent_slow_attack_plans() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn completed_sage_plan_is_visible_before_other_plans_finish() {
+    let harness = harness("196", Duration::ZERO, None).await;
+    harness
+        .plan_delays
+        .lock()
+        .unwrap()
+        .insert("dual".to_owned(), Duration::from_millis(300));
+    let submitted = json_request(
+        &harness.app,
+        "POST",
+        "/v1/estimates",
+        &estimate_request("128"),
+        None,
+    )
+    .await;
+    let id = submitted.1["batch_id"].as_str().unwrap();
+    let partial = wait_for_detail(&harness.app, id, |detail| {
+        detail["state"]["kind"] == "running"
+            && detail["cases"][0]["result"]["attacks"]
+                .as_array()
+                .is_some_and(|attacks| !attacks.is_empty())
+    })
+    .await;
+    let attacks = partial["cases"][0]["result"]["attacks"].as_array().unwrap();
+    assert!(attacks.iter().any(|item| item["attack"] == "usvp"));
+    assert!(!attacks.iter().any(|item| item["attack"] == "dual"));
+    assert_eq!(
+        raw_request(
+            &harness.app,
+            "GET",
+            &format!("/v1/batches/{id}/export"),
+            Body::empty(),
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let summaries = json_request(&harness.app, "GET", "/v1/batches", &json!(null), None)
+        .await
+        .1;
+    assert_eq!(summaries[0]["batch_id"], id);
+    assert!(summaries[0].get("case_count").is_some());
+    assert!(summaries[0].get("request").is_none());
+    assert!(summaries[0].get("cases").is_none());
+    assert!(summaries[0].get("report").is_none());
+
+    let response = raw_request(
+        &harness.app,
+        "GET",
+        &format!("/v1/batches/{id}"),
+        Body::empty(),
+        None,
+        None,
+    )
+    .await;
+    let etag = response.headers()[header::ETAG]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        raw_request(
+            &harness.app,
+            "GET",
+            &format!("/v1/batches/{id}"),
+            Body::empty(),
+            None,
+            Some(&etag),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_MODIFIED
+    );
+    let completed = wait_for_terminal(&harness.app, id).await;
+    assert_eq!(
+        completed["cases"][0]["result"]["attacks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        completed["cases"][0]["expected_attack_count"]
+            .as_u64()
+            .unwrap() as usize
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn completed_case_is_visible_while_another_case_is_running() {
+    let harness = harness("196", Duration::ZERO, None).await;
+    harness
+        .dimension_delays
+        .lock()
+        .unwrap()
+        .insert(129, Duration::from_millis(300));
+    let mut request = estimate_request("128");
+    let mut second = request.cases[0].clone();
+    second.id = "second-case".to_owned();
+    second.name = "Second case".to_owned();
+    let lattice_estimator_web::Problem::Lwe(problem) = &mut second.problem else {
+        panic!("demo request must contain LWE parameters");
+    };
+    problem.dimension = 129;
+    request.cases.push(second);
+    let submitted = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
+    let id = submitted.1["batch_id"].as_str().unwrap();
+    let progress = wait_for_detail(&harness.app, id, |detail| {
+        detail["state"]["kind"] == "running"
+            && detail["cases"][0]["state"]["kind"] == "completed"
+            && detail["cases"][1]["state"]["kind"] == "running"
+    })
+    .await;
+    assert!(progress["cases"][0]["result"]["attacks"].is_array());
+    assert!(progress["report"].is_null());
+    wait_for_terminal(&harness.app, id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn retry_clears_partial_results_and_republishes_cached_attacks() {
+    let harness = harness("196", Duration::ZERO, None).await;
+    harness
+        .plan_delays
+        .lock()
+        .unwrap()
+        .insert("dual".to_owned(), Duration::from_millis(100));
+    harness
+        .retryable_failures
+        .lock()
+        .unwrap()
+        .insert("dual".to_owned(), 1);
+
+    let submitted = json_request(
+        &harness.app,
+        "POST",
+        "/v1/estimates",
+        &estimate_request("128"),
+        None,
+    )
+    .await;
+    let id = submitted.1["batch_id"].as_str().unwrap();
+    let retried = wait_for_detail(&harness.app, id, |detail| {
+        let plans = harness.plans.lock().unwrap();
+        let dual_attempts = plans
+            .iter()
+            .filter(|plan| plan.first().is_some_and(|attack| attack == "dual"))
+            .count();
+        dual_attempts >= 2
+            && detail["state"]["kind"] == "running"
+            && detail["cases"][0]["result"]["attacks"]
+                .as_array()
+                .is_some_and(|attacks| attacks.iter().any(|item| item["attack"] == "usvp"))
+    })
+    .await;
+    assert_eq!(retried["cases"][0]["state"]["kind"], "running");
+
+    let completed = wait_for_terminal(&harness.app, id).await;
+    assert_eq!(completed["state"]["kind"], "completed");
+    let plans = harness.plans.lock().unwrap();
+    assert_eq!(
+        plans
+            .iter()
+            .filter(|plan| plan.first().is_some_and(|attack| attack == "dual"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        plans
+            .iter()
+            .filter(|plan| plan.first().is_some_and(|attack| attack == "usvp"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn etag_and_batch_deletion_keep_the_attack_cache() {
     let harness = harness("196", Duration::ZERO, None).await;
     let request = estimate_request("128");
@@ -218,6 +399,79 @@ async fn parameter_set_replace_and_delete_are_exposed_as_use_cases() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn bulk_delete_removes_multiple_parameter_sets_and_finished_batches() {
+    let harness = harness("196", Duration::ZERO, None).await;
+    let mut set: Value = serde_json::from_str(include_str!(
+        "../../examples/demo-scheme.lattice-params.json"
+    ))
+    .unwrap();
+    for id in ["bulk-set-a", "bulk-set-b"] {
+        set["id"] = json!(id);
+        assert_eq!(
+            json_request(
+                &harness.app,
+                "POST",
+                "/v1/parameter-sets/import",
+                &set,
+                None,
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+    }
+    assert_eq!(
+        json_request(
+            &harness.app,
+            "POST",
+            "/v1/parameter-sets/bulk-delete",
+            &json!({ "ids": ["bulk-set-a", "bulk-set-b"] }),
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        json_request(
+            &harness.app,
+            "GET",
+            "/v1/parameter-sets",
+            &Value::Null,
+            None,
+        )
+        .await
+        .1,
+        json!([])
+    );
+
+    let request = estimate_request("128");
+    let first = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
+    let first_id = first.1["batch_id"].as_str().unwrap().to_owned();
+    wait_for_terminal(&harness.app, &first_id).await;
+    let second = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
+    let second_id = second.1["batch_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        json_request(
+            &harness.app,
+            "POST",
+            "/v1/batches/bulk-delete",
+            &json!({ "ids": [first_id, second_id] }),
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        json_request(&harness.app, "GET", "/v1/batches", &Value::Null, None)
+            .await
+            .1,
+        json!([])
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_protects_api_and_errors_use_the_public_envelope() {
     let harness = harness("196", Duration::ZERO, Some("secret".to_owned())).await;
@@ -265,11 +519,17 @@ async fn harness(
     let active = Arc::new(AtomicUsize::new(0));
     let max_active = Arc::new(AtomicUsize::new(0));
     let plans = Arc::new(Mutex::new(Vec::new()));
+    let plan_delays = Arc::new(Mutex::new(HashMap::new()));
+    let dimension_delays = Arc::new(Mutex::new(HashMap::new()));
+    let retryable_failures = Arc::new(Mutex::new(HashMap::new()));
     let worker_state = MockState {
         calls: calls.clone(),
         active,
         max_active: max_active.clone(),
         plans: plans.clone(),
+        plan_delays: plan_delays.clone(),
+        dimension_delays: dimension_delays.clone(),
+        retryable_failures: retryable_failures.clone(),
         delay,
         security_bits,
     };
@@ -299,6 +559,9 @@ async fn harness(
         calls,
         max_active,
         plans,
+        plan_delays,
+        dimension_delays,
+        retryable_failures,
         _directory: directory,
         worker,
     }
@@ -324,11 +587,55 @@ async fn mock_estimate(State(state): State<MockState>, Json(request): Json<Value
             .map(|item| item.as_str().unwrap().to_owned())
             .collect(),
     );
-    tokio::time::sleep(state.delay).await;
-    let results = targets.into_iter().map(|attack| json!({
-        "attack": attack,
-        "outcome": { "kind": "computed", "security_bits": state.security_bits, "metrics": {} }
-    })).collect::<Vec<_>>();
+    let dimension = request["problem"]["dimension"].as_u64();
+    let plan = targets.first().and_then(Value::as_str);
+    let delay = dimension
+        .and_then(|dimension| {
+            state
+                .dimension_delays
+                .lock()
+                .unwrap()
+                .get(&dimension)
+                .copied()
+        })
+        .or_else(|| plan.and_then(|attack| state.plan_delays.lock().unwrap().get(attack).copied()))
+        .unwrap_or(state.delay);
+    tokio::time::sleep(delay).await;
+    let retryable_failure = plan.is_some_and(|attack| {
+        let mut failures = state.retryable_failures.lock().unwrap();
+        let remaining = failures.entry(attack.to_owned()).or_default();
+        if *remaining == 0 {
+            false
+        } else {
+            *remaining -= 1;
+            true
+        }
+    });
+    let results = targets
+        .into_iter()
+        .map(|attack| {
+            if retryable_failure {
+                json!({
+                    "attack": attack,
+                    "outcome": {
+                        "kind": "failed",
+                        "code": "mock_retryable_failure",
+                        "message": "transient mock failure",
+                        "retryable": true
+                    }
+                })
+            } else {
+                json!({
+                    "attack": attack,
+                    "outcome": {
+                        "kind": "computed",
+                        "security_bits": state.security_bits,
+                        "metrics": {}
+                    }
+                })
+            }
+        })
+        .collect::<Vec<_>>();
     state.active.fetch_sub(1, Ordering::SeqCst);
     Json(json!({
         "schema_version": 2,
@@ -415,4 +722,17 @@ async fn wait_for_terminal(app: &Router, id: &str) -> Value {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("batch did not finish")
+}
+
+async fn wait_for_detail(app: &Router, id: &str, predicate: impl Fn(&Value) -> bool) -> Value {
+    for _ in 0..200 {
+        let detail = json_request(app, "GET", &format!("/v1/batches/{id}"), &Value::Null, None)
+            .await
+            .1;
+        if predicate(&detail) {
+            return detail;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("batch detail did not reach the expected progress state")
 }

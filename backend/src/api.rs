@@ -13,9 +13,11 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::{
     EstimateRequest, ParameterSetFile,
+    application::BatchDetail,
     error::ServiceError,
     service::{AppState, BatchSnapshot},
 };
@@ -29,11 +31,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/metadata", get(metadata))
         .route("/v1/estimates", post(estimate))
         .route("/v1/batches", get(batches))
+        .route("/v1/batches/bulk-delete", post(delete_batches))
         .route("/v1/batches/{batch_id}", get(batch).delete(delete_batch))
         .route("/v1/batches/{batch_id}/cancel", post(cancel))
         .route("/v1/batches/{batch_id}/rerun", post(rerun))
         .route("/v1/batches/{batch_id}/export", get(export_report))
         .route("/v1/parameter-sets", get(parameter_sets))
+        .route(
+            "/v1/parameter-sets/bulk-delete",
+            post(delete_parameter_sets),
+        )
         .route("/v1/parameter-sets/import", post(import_parameter_set))
         .route(
             "/v1/parameter-sets/{parameter_set_id}",
@@ -100,8 +107,8 @@ async fn batch(
     Path(batch_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ServiceError> {
-    let snapshot = state.application.batch(&batch_id).await?;
-    let etag = format!("\"{}\"", snapshot.revision);
+    let detail = state.application.batch(&batch_id).await?;
+    let etag = format!("\"{}\"", detail.revision);
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -115,13 +122,23 @@ async fn batch(
         );
         return Ok(response);
     }
-    snapshot_response(StatusCode::OK, snapshot)
+    detail_response(StatusCode::OK, detail)
 }
 
 async fn batches(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<crate::application::BatchRecord>>, ServiceError> {
+) -> Result<Json<Vec<crate::application::BatchSummary>>, ServiceError> {
     Ok(Json(state.application.batches().await?))
+}
+
+fn detail_response(status: StatusCode, detail: BatchDetail) -> Result<Response, ServiceError> {
+    let etag = format!("\"{}\"", detail.revision);
+    let mut response = (status, Json(detail)).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).map_err(|error| ServiceError::Internal(error.to_string()))?,
+    );
+    Ok(response)
 }
 
 async fn delete_batch(
@@ -129,6 +146,40 @@ async fn delete_batch(
     Path(batch_id): Path<String>,
 ) -> Result<StatusCode, ServiceError> {
     state.application.delete_batch(batch_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct BulkDeleteRequest {
+    ids: Vec<String>,
+}
+
+fn bulk_delete_ids(
+    payload: Result<Json<BulkDeleteRequest>, JsonRejection>,
+) -> Result<Vec<String>, ServiceError> {
+    let request = json_payload(payload)?;
+    if request.ids.is_empty() || request.ids.len() > 500 {
+        return Err(ServiceError::BadRequest(
+            "bulk delete requires 1..=500 ids".to_owned(),
+        ));
+    }
+    let mut unique = HashSet::with_capacity(request.ids.len());
+    if request.ids.iter().any(|id| !unique.insert(id)) {
+        return Err(ServiceError::BadRequest(
+            "bulk delete ids must be unique".to_owned(),
+        ));
+    }
+    Ok(request.ids)
+}
+
+async fn delete_batches(
+    State(state): State<Arc<AppState>>,
+    payload: Result<Json<BulkDeleteRequest>, JsonRejection>,
+) -> Result<StatusCode, ServiceError> {
+    state
+        .application
+        .delete_batches(bulk_delete_ids(payload)?)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -239,6 +290,17 @@ async fn delete_parameter_set(
     state
         .application
         .delete_parameter_set(&parameter_set_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_parameter_sets(
+    State(state): State<Arc<AppState>>,
+    payload: Result<Json<BulkDeleteRequest>, JsonRejection>,
+) -> Result<StatusCode, ServiceError> {
+    state
+        .application
+        .delete_parameter_sets(bulk_delete_ids(payload)?)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
