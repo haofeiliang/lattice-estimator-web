@@ -16,10 +16,10 @@
     <fieldset class="case-field-group">
       <legend>基本设置</legend>
       <div class="case-fields">
-        <label>Case ID（自动生成）<input bind:value={draft.id} readonly /></label>
+        <label>参数 ID（自动生成）<input bind:value={draft.id} readonly /></label>
         <label>名称<input bind:value={draft.name} /></label>
         <label>问题类型<select bind:value={draft.kind}><option value="lwe">LWE</option><option value="rlwe">RLWE</option><option value="glwe">GLWE</option><option value="ntru">NTRU</option><option value="sis">SIS</option></select></label>
-        <label>安全模型<select bind:value={draft.securityModel}><option value="classical">Classical</option><option value="quantum">Quantum</option></select></label>
+        <label>安全模型<select bind:value={draft.securityModel}><option value="classical">经典</option><option value="quantum">量子</option></select></label>
       </div>
     </fieldset>
 
@@ -35,7 +35,7 @@
           <label>长度界 β<input bind:value={draft.lengthBound} /></label>
           <label>范数<select bind:value={draft.sisNorm}><option value="l2">L2</option><option value="l_infinity">L∞</option></select></label>
         {:else}
-          {#if draft.kind !== 'ntru'}<label>样本数<input bind:value={draft.samples} placeholder="unlimited 或整数" /></label>{/if}
+          {#if draft.kind !== 'ntru'}<label>样本数<input bind:value={draft.samples} placeholder="输入 unlimited（无限）或整数" /></label>{/if}
         {/if}
       </div>
     </fieldset>
@@ -45,7 +45,7 @@
         <legend>私钥分布</legend>
         <div class="distribution-fields">
           <label>分布类型<select bind:value={draft.secretKind}><option value="uniform_binary">均匀二元</option><option value="sparse_ternary">稀疏三元 (1/4, 1/2, 1/4)</option><option value="uniform_ternary">均匀三元</option><option value="fixed_weight_binary">固定重量二元</option><option value="fixed_weight_ternary">固定重量三元</option><option value="discrete_gaussian">离散高斯</option><option value="centered_binomial">中心二项</option><option value="uniform_integer">有界均匀整数</option></select></label>
-          {#if draft.secretKind === 'fixed_weight_binary'}<label>Hamming weight<input type="number" min="0" bind:value={draft.secretWeight} /></label>{/if}
+          {#if draft.secretKind === 'fixed_weight_binary'}<label>汉明重量<input type="number" min="0" bind:value={draft.secretWeight} /></label>{/if}
           {#if draft.secretKind === 'fixed_weight_ternary'}<label>+1 数量<input type="number" min="0" bind:value={draft.secretPositiveWeight} /></label><label>-1 数量<input type="number" min="0" bind:value={draft.secretNegativeWeight} /></label>{/if}
           {#if draft.secretKind === 'discrete_gaussian'}<label>标准差 σ<input bind:value={draft.secretSigma} /></label>{/if}
           {#if draft.secretKind === 'centered_binomial'}<label>参数 η<input type="number" min="1" bind:value={draft.secretEta} /></label>{/if}

@@ -54,15 +54,19 @@ impl Drop for Harness {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn arora_preflight_can_skip_arora_while_bkw_runs_and_is_cached() {
+async fn reviewed_bounded_preflight_can_skip_both_slow_attacks() {
     let harness = harness("196", Duration::from_millis(10), None).await;
-    let request = estimate_request("128");
+    let mut request = estimate_request("128");
+    let lattice_estimator_web::Problem::Lwe(problem) = &mut request.cases[0].problem else {
+        panic!("test request must contain LWE parameters");
+    };
+    problem.error = lattice_estimator_web::ErrorDistribution::CenteredBinomial { eta: 8 };
     let first = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
     assert_eq!(first.0, StatusCode::ACCEPTED);
     let batch_id = first.1["batch_id"].as_str().unwrap();
     let completed = wait_for_terminal(&harness.app, batch_id).await;
     assert_eq!(completed["state"]["kind"], "completed");
-    assert_eq!(harness.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(harness.calls.load(Ordering::SeqCst), 2);
     let attacks = completed["report"]["reports"][0]["attacks"]
         .as_array()
         .unwrap();
@@ -71,10 +75,10 @@ async fn arora_preflight_can_skip_arora_while_bkw_runs_and_is_cached() {
             .iter()
             .filter(|item| item["outcome"]["code"] == "attack_preflight_above_threshold")
             .count(),
-        1
+        2
     );
     assert!(
-        harness
+        !harness
             .plans
             .lock()
             .unwrap()
@@ -83,7 +87,7 @@ async fn arora_preflight_can_skip_arora_while_bkw_runs_and_is_cached() {
 
     let second = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
     assert_eq!(second.0, StatusCode::OK);
-    assert_eq!(harness.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(harness.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
@@ -664,7 +668,7 @@ async fn mock_preflight(State(state): State<MockState>, Json(request): Json<Valu
                     "kind": "computed",
                     "security_bits": state.security_bits,
                     "metrics": {
-                        "preflight_rule_version": {"kind": "integer", "value": "2"}
+                        "preflight_rule_version": {"kind": "integer", "value": "4"}
                     }
                 }
             })

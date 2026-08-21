@@ -4,6 +4,12 @@ Rust backend and Svelte frontend for managing lattice-estimator runs. The
 browser communicates only with the Rust backend; Sage remains isolated in the
 separate `lattice-estimator-api` service.
 
+The adaptive slow-attack scheduler accepts matching rule-v4 preflight results
+with one 10-bit floor per attack. Its reviewed bounded-error domain is centered
+binomial eta 1 through 8 and symmetric uniform integer radii 1 through 8. BKW
+admits finite or unlimited samples there; bounded Arora-GB requires unlimited
+samples. Unknown, mismatched, and out-of-domain results run the exact attack.
+
 ## Repository layout
 
 - `backend/`: HTTP API, scheduler, SQLite state, cache, CLI, schemas, and tests.

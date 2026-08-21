@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import CaseEditor from './CaseEditor.svelte';
-  import { api, ApiError, download } from './api';
+  import { api, ApiError, download, userMessage } from './api';
   import { appendFreshDraft, caseFromDraft, commaList, draftFromCase, freshDraft, freshIdentifier } from './drafts';
   import type { CaseDraft } from './drafts';
   import type { EstimateRequest, ParameterSet, ParameterSetSummary } from './types';
@@ -201,7 +201,7 @@
     selected = '';
     setId = freshIdentifier('scheme');
     generatedSetId = true;
-    setName = 'New scheme';
+    setName = '新方案';
     description = '';
     tags = '';
     drafts = [freshDraft(1)];
@@ -230,7 +230,7 @@
   }
 
   function showError(error: unknown) {
-    message = String(error);
+    message = userMessage(error);
     messageIsError = true;
   }
 
@@ -242,7 +242,7 @@
 <div class="split schemes">
   <aside class="panel list-pane">
     <header>
-      <div><p class="eyebrow">PARAMETER SETS</p><h2>方案库</h2></div>
+      <div><p class="eyebrow">参数方案</p><h2>方案库</h2></div>
       <div class="actions compact-actions">
         <button on:click={create}>新建</button>
         <label class="file-button">导入<input type="file" accept="application/json" on:change={importFile} /></label>
@@ -261,7 +261,7 @@
           <input type="checkbox" checked={checkedIds.has(item.id)} on:change={() => toggleChecked(item.id)} aria-label={`选择方案 ${item.name}`} />
         </label>
         <button class:selected={selected === item.id} class="list-item" on:click={() => open(item.id)}>
-          <strong>{item.name}</strong><span>{item.id} · v{item.version} · {item.case_count} cases</span>
+          <strong>{item.name}</strong><span>{item.id} · 第 {item.version} 版 · {item.case_count} 组参数</span>
         </button>
       </div>
     {/each}
@@ -270,7 +270,7 @@
   <section class="panel detail-pane scheme-editor">
     {#if drafts.length > 0}
       <header>
-        <div><p class="eyebrow">EDIT PARAMETER SET</p><h2>{setName || setId}</h2></div>
+        <div><p class="eyebrow">编辑参数方案</p><h2>{setName || setId}</h2></div>
         <div class="actions">
           <button on:click={() => download(`${setId}.lattice-params.json`, value())}>导出 JSON</button>
           {#if selected}<button class="danger" on:click={() => remove(selected)}>删除</button>{/if}
@@ -319,7 +319,7 @@
 
       <div class="actions editor-actions">
         <button class="secondary" disabled={busy} on:click={save}>{busy ? '处理中…' : selected ? '保存新版本' : '保存方案'}</button>
-        <button class="primary" disabled={busy} on:click={run}>{busy ? '处理中…' : '运行全部 cases'}</button>
+        <button class="primary" disabled={busy} on:click={run}>{busy ? '处理中…' : '运行全部参数'}</button>
       </div>
     {:else}
       <div class="empty centered"><span>从左侧选择方案，或新建/导入一个参数方案。</span><button class="primary" on:click={create}>新建方案</button></div>

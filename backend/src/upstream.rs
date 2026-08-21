@@ -113,6 +113,10 @@ pub enum WorkerOutcome {
         #[serde(default)]
         raw_result: Option<serde_json::Value>,
     },
+    PreflightUnknown {
+        code: String,
+        reason: String,
+    },
     Unsupported {
         code: String,
         reason: String,

@@ -7,8 +7,26 @@ export class ApiError extends Error {
     readonly code?: string,
   ) {
     super(message);
-    this.name = 'Error';
+    this.name = 'ApiError';
   }
+}
+
+export function userMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) {
+    return error instanceof TypeError ? '网络请求失败，请检查服务是否可用' : '发生了未知错误';
+  }
+  const summary = ({
+    400: '请求内容有误',
+    401: '身份验证失败，请检查 API 令牌',
+    404: '请求的内容不存在',
+    409: '操作冲突，请刷新后重试',
+    422: '输入参数未通过验证',
+    500: '服务内部错误',
+    502: '估算服务暂时不可用',
+    503: '服务暂时不可用',
+    504: '估算请求超时',
+  } as Record<number, string>)[error.status] ?? `请求失败（HTTP ${error.status}）`;
+  return error.code ? `${summary}（${error.code}）` : summary;
 }
 
 export function setToken(value: string) {

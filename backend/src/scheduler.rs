@@ -733,6 +733,11 @@ impl Runner {
                     reason,
                     raw_result,
                 },
+                WorkerOutcome::PreflightUnknown { code, reason } => AttackOutcome::Failed {
+                    code: format!("unexpected_preflight_outcome:{code}"),
+                    message: format!("exact estimator returned a preflight-only outcome: {reason}"),
+                    retryable: false,
+                },
                 WorkerOutcome::Unsupported { code, reason } => {
                     AttackOutcome::Unsupported { code, reason }
                 }
@@ -874,7 +879,7 @@ impl Runner {
         let mut warnings = analysis_warnings(&context.analysis_model);
         if threshold_skipped {
             warnings.push(
-                "slow attacks were excluded because their attack-specific preflight estimates met the requested security target plus margin; completeness is relative to that preflight policy"
+                "慢攻击的专用快速估算已达到目标安全值与余量，因此跳过精确计算；完整性以该快速筛选策略为准"
                     .to_owned(),
             );
         }
@@ -888,14 +893,14 @@ impl Runner {
                 .collect::<Vec<_>>()
                 .join(", ");
             warnings.push(format!(
-                "slow attacks were explicitly forced ({attacks}); preflight stop rules were bypassed"
+                "已手动强制运行慢攻击（{attacks}），未采用快速筛选的停止规则"
             ));
             for attack in &policy.forced_attacks {
                 let applicability = context
                     .applicability(*attack)
                     .expect("forced slow attacks have applicability rules");
                 warnings.push(format!(
-                    "policy audit for {}: {} — {}",
+                    "{} 策略记录：{} — {}",
                     slow_attack_label(*attack),
                     applicability.code,
                     applicability.reason
@@ -1117,10 +1122,7 @@ fn preflight_stop_margin(
     attack: Attack,
     problem: &crate::LweProblem,
 ) -> Option<bigdecimal::BigDecimal> {
-    let safety_floor = match (attack, &problem.error) {
-        (Attack::AroraGb, crate::ErrorDistribution::DiscreteGaussian { .. }) => 10,
-        _ => return None,
-    };
+    let safety_floor = crate::reviewed_preflight_margin_floor(problem, attack)?;
     Some(
         policy
             .stop_margin_bits
@@ -1142,7 +1144,7 @@ fn reviewed_preflight_security_bits(outcome: &WorkerOutcome) -> Option<&crate::E
 fn preflight_rule_is_reviewed(metrics: &BTreeMap<String, NormalizedMetric>) -> bool {
     matches!(
         metrics.get("preflight_rule_version"),
-        Some(NormalizedMetric::Integer { value }) if value.as_bigint() == 2.into()
+        Some(NormalizedMetric::Integer { value }) if value.as_bigint() == 4.into()
     )
 }
 
@@ -1196,7 +1198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn arora_preflight_margin_uses_calibrated_gaussian_domains() {
+    fn slow_attack_preflight_margins_use_only_reviewed_error_domains() {
         let policy = crate::SlowAttackPolicy {
             required_security_bits: crate::ExactDecimal::new("128").unwrap(),
             stop_margin_bits: crate::ExactDecimal::new("4").unwrap(),
@@ -1221,6 +1223,50 @@ mod tests {
         );
         assert_eq!(
             preflight_stop_margin(&policy, Attack::Bkw, &problem("1")),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+        let mut centered_binomial = problem("1");
+        centered_binomial.error = crate::ErrorDistribution::CenteredBinomial { eta: 8 };
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &centered_binomial),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::Bkw, &centered_binomial),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+        let mut finite_bounded = centered_binomial.clone();
+        finite_bounded.samples = crate::SampleCount::Finite { count: 4096 };
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &finite_bounded),
+            None
+        );
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::Bkw, &finite_bounded),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+        let mut centered_uniform = problem("1");
+        centered_uniform.error = crate::ErrorDistribution::UniformInteger {
+            lower: crate::SignedInteger::new("-8").unwrap(),
+            upper: crate::SignedInteger::new("8").unwrap(),
+        };
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &centered_uniform),
+            Some(bigdecimal::BigDecimal::from(10))
+        );
+        let mut unreviewed_binomial = problem("1");
+        unreviewed_binomial.error = crate::ErrorDistribution::CenteredBinomial { eta: 9 };
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &unreviewed_binomial),
+            None
+        );
+        let mut asymmetric_uniform = problem("1");
+        asymmetric_uniform.error = crate::ErrorDistribution::UniformInteger {
+            lower: crate::SignedInteger::new("0").unwrap(),
+            upper: crate::SignedInteger::new("8").unwrap(),
+        };
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::Bkw, &asymmetric_uniform),
             None
         );
         let mut finite_samples = problem("1");
@@ -1255,7 +1301,14 @@ mod tests {
             )]),
         };
         assert!(reviewed_preflight_security_bits(&outcome("1")).is_none());
-        assert!(reviewed_preflight_security_bits(&outcome("2")).is_some());
+        assert!(reviewed_preflight_security_bits(&outcome("2")).is_none());
+        assert!(reviewed_preflight_security_bits(&outcome("3")).is_none());
+        assert!(reviewed_preflight_security_bits(&outcome("4")).is_some());
+        let unknown = WorkerOutcome::PreflightUnknown {
+            code: "bounded_search_no_finite_candidate".to_owned(),
+            reason: "exact estimation is required".to_owned(),
+        };
+        assert!(reviewed_preflight_security_bits(&unknown).is_none());
     }
 
     #[test]

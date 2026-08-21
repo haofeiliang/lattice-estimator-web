@@ -5,7 +5,10 @@ use num_bigint::BigInt;
 use crate::{Attack, ErrorDistribution, EstimatorProblem, LweProblem};
 
 /// Version of the reviewed slow-attack applicability rules.
-pub const SLOW_ATTACK_APPLICABILITY_RULE_VERSION: u32 = 2;
+pub const SLOW_ATTACK_APPLICABILITY_RULE_VERSION: u32 = 3;
+
+pub const ARORA_GB_PREFLIGHT_MARGIN_FLOOR_BITS: u64 = 10;
+pub const BKW_PREFLIGHT_MARGIN_FLOOR_BITS: u64 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlowAttackApplicability {
@@ -43,33 +46,92 @@ fn arora_gb_applicability(problem: &LweProblem) -> SlowAttackApplicability {
             SlowAttackApplicability::applicable(
                 "arora_gaussian_preflight",
                 format!(
-                    "Gaussian-like error with n={} and sigma={standard_deviation} is screened by the attack-specific Arora-GB estimate",
+                    "高斯型噪声 n={}、sigma={standard_deviation} 使用 Arora-GB 专用快速估算筛选",
                     problem.dimension
                 ),
             )
         }
-        error => {
+        error
+            if matches!(problem.samples, crate::SampleCount::Unlimited)
+                && reviewed_bounded_error(error) =>
+        {
             let width = bounded_error_width(error)
                 .expect("centered-binomial and uniform-integer errors are bounded");
             SlowAttackApplicability::applicable(
-                "arora_bounded_exact",
+                "arora_bounded_preflight",
                 format!(
-                    "bounded error support width D={width} and n={} use exact Arora-GB because the Gaussian preflight model does not apply",
+                    "有界噪声支撑宽度 D={width}、n={} 使用经校准的 Arora-GB 快速估算筛选",
                     problem.dimension
                 ),
             )
         }
+        _ => SlowAttackApplicability::applicable(
+            "arora_exact_unreviewed_error_model",
+            format!(
+                "n={} 的噪声分布不在 Arora-GB 快速估算审核域内，执行精确 Arora-GB",
+                problem.dimension
+            ),
+        ),
     }
 }
 
 fn bkw_applicability(problem: &LweProblem) -> SlowAttackApplicability {
-    SlowAttackApplicability::applicable(
-        "bkw_exact_enabled",
-        format!(
-            "n={} and q={} use exact BKW because the quick estimate is not calibrated for production skipping",
-            problem.dimension, problem.modulus
+    match &problem.error {
+        ErrorDistribution::DiscreteGaussian { standard_deviation } => {
+            SlowAttackApplicability::applicable(
+                "bkw_structural_preflight",
+                format!(
+                    "离散高斯噪声 n={}、q={}、sigma={standard_deviation} 使用结构化 coded-BKW 快速估算筛选",
+                    problem.dimension, problem.modulus
+                ),
+            )
+        }
+        error if reviewed_bounded_error(error) => SlowAttackApplicability::applicable(
+            "bkw_structural_bounded_preflight",
+            format!(
+                "n={}、q={} 的中心有界噪声使用经校准的结构化 coded-BKW 快速估算筛选",
+                problem.dimension, problem.modulus
+            ),
         ),
-    )
+        _ => SlowAttackApplicability::applicable(
+            "bkw_exact_unreviewed_error_model",
+            format!(
+                "n={}、q={} 的噪声模型尚未完成 BKW 快速估算校准，执行精确 BKW",
+                problem.dimension, problem.modulus
+            ),
+        ),
+    }
+}
+
+/// Return the per-attack uniform margin floor for a reviewed preflight domain.
+pub fn reviewed_preflight_margin_floor(problem: &LweProblem, attack: Attack) -> Option<u64> {
+    match attack {
+        Attack::AroraGb
+            if matches!(&problem.error, ErrorDistribution::DiscreteGaussian { .. })
+                || (matches!(problem.samples, crate::SampleCount::Unlimited)
+                    && reviewed_bounded_error(&problem.error)) =>
+        {
+            Some(ARORA_GB_PREFLIGHT_MARGIN_FLOOR_BITS)
+        }
+        Attack::Bkw if reviewed_error(&problem.error) => Some(BKW_PREFLIGHT_MARGIN_FLOOR_BITS),
+        _ => None,
+    }
+}
+
+fn reviewed_error(error: &ErrorDistribution) -> bool {
+    matches!(error, ErrorDistribution::DiscreteGaussian { .. }) || reviewed_bounded_error(error)
+}
+
+fn reviewed_bounded_error(error: &ErrorDistribution) -> bool {
+    match error {
+        ErrorDistribution::CenteredBinomial { eta } => *eta <= 8,
+        ErrorDistribution::UniformInteger { lower, upper } => {
+            let lower = lower.as_bigint();
+            let upper = upper.as_bigint();
+            upper >= BigInt::from(1) && upper <= BigInt::from(8) && lower == -upper
+        }
+        ErrorDistribution::DiscreteGaussian { .. } => false,
+    }
 }
 
 fn bounded_error_width(error: &ErrorDistribution) -> Option<BigInt> {
@@ -136,7 +198,7 @@ mod tests {
             slow_attack_applicability(&applicable, Attack::Bkw)
                 .unwrap()
                 .code,
-            "bkw_exact_enabled"
+            "bkw_structural_preflight"
         );
 
         let outside = lwe(728, "2013265921", SampleCount::Unlimited, gaussian("11000"));
@@ -144,7 +206,70 @@ mod tests {
             slow_attack_applicability(&outside, Attack::Bkw)
                 .unwrap()
                 .code,
-            "bkw_exact_enabled"
+            "bkw_structural_preflight"
+        );
+    }
+
+    #[test]
+    fn only_calibrated_centered_bounded_errors_use_preflight() {
+        let binomial = lwe(
+            1024,
+            "4096",
+            SampleCount::Unlimited,
+            ErrorDistribution::CenteredBinomial { eta: 8 },
+        );
+        assert_eq!(
+            slow_attack_applicability(&binomial, Attack::AroraGb)
+                .unwrap()
+                .code,
+            "arora_bounded_preflight"
+        );
+        assert_eq!(
+            slow_attack_applicability(&binomial, Attack::Bkw)
+                .unwrap()
+                .code,
+            "bkw_structural_bounded_preflight"
+        );
+
+        let finite_binomial = lwe(
+            128,
+            "4093",
+            SampleCount::Finite { count: 4096 },
+            ErrorDistribution::CenteredBinomial { eta: 8 },
+        );
+        assert_eq!(
+            slow_attack_applicability(&finite_binomial, Attack::AroraGb)
+                .unwrap()
+                .code,
+            "arora_exact_unreviewed_error_model"
+        );
+        assert_eq!(
+            slow_attack_applicability(&finite_binomial, Attack::Bkw)
+                .unwrap()
+                .code,
+            "bkw_structural_bounded_preflight"
+        );
+
+        let unreviewed = lwe(
+            1024,
+            "4096",
+            SampleCount::Unlimited,
+            ErrorDistribution::UniformInteger {
+                lower: crate::SignedInteger::new("0").unwrap(),
+                upper: crate::SignedInteger::new("8").unwrap(),
+            },
+        );
+        assert_eq!(
+            slow_attack_applicability(&unreviewed, Attack::AroraGb)
+                .unwrap()
+                .code,
+            "arora_exact_unreviewed_error_model"
+        );
+        assert_eq!(
+            slow_attack_applicability(&unreviewed, Attack::Bkw)
+                .unwrap()
+                .code,
+            "bkw_exact_unreviewed_error_model"
         );
     }
 }

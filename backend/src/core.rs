@@ -5,7 +5,9 @@
 //! surface without knowing how the service executes work.
 
 pub use crate::applicability::{
-    SLOW_ATTACK_APPLICABILITY_RULE_VERSION, SlowAttackApplicability, slow_attack_applicability,
+    ARORA_GB_PREFLIGHT_MARGIN_FLOOR_BITS, BKW_PREFLIGHT_MARGIN_FLOOR_BITS,
+    SLOW_ATTACK_APPLICABILITY_RULE_VERSION, SlowAttackApplicability,
+    reviewed_preflight_margin_floor, slow_attack_applicability,
 };
 pub use crate::canonical::{AttackCacheIdentity, EstimatorContext, canonical_json, stable_hash};
 pub use crate::domain::*;

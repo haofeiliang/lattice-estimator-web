@@ -602,9 +602,8 @@ fn coefficient_embedding(
             error: error.clone(),
         }),
         warnings: vec![
-            "coefficient_embedding_v1 treats structured coefficient equations as an unstructured LWE instance"
-                .into(),
-            "the estimate does not constitute a direct analysis of the original ring problem".into(),
+            "系数嵌入模型将带结构的系数方程视为无结构 LWE 实例".into(),
+            "该结果不是对原始环问题的直接安全分析".into(),
         ],
     })
 }

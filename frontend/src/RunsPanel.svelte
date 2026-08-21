@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, apiResponse, download } from './api';
+  import { api, apiResponse, download, userMessage } from './api';
+  import { outcomeName, stateName, technicalDetail } from './display';
   import ProblemSummary from './ProblemSummary.svelte';
-  import type { AttackResult, BatchDetail, BatchSummary, RunState } from './types';
+  import type { BatchDetail, BatchSummary } from './types';
 
   let records: BatchSummary[] = [];
   let selected = '';
@@ -16,19 +17,12 @@
   $: allDeletableChecked = deletableIds.length > 0 && deletableIds.every(id => checkedIds.has(id));
 
   function bits(value?: string) { return value ? Number(value).toFixed(2) : '—'; }
-  function reason(result: AttackResult) { return result.outcome.reason ?? result.outcome.message ?? result.outcome.code ?? ''; }
   function terminal(kind?: string) { return Boolean(kind && ['completed', 'partial', 'timed_out', 'cancelled', 'failed'].includes(kind)); }
-  function stateName(state?: RunState) {
-    return ({
-      queued: '等待中', running: '运行中', cancel_requested: '取消中', cancelled: '已取消',
-      completed: '已完成', partial: '部分完成', timed_out: '已超时', interrupted: '已中断', failed: '失败'
-    } as Record<string, string>)[state?.kind ?? ''] ?? state?.kind ?? '等待中';
-  }
   function runTitle(current: BatchDetail) {
     const name = current.request.name?.trim();
     if (name) return name;
     const cases = current.request.cases;
-    return cases.length === 1 ? cases[0].name : `${cases[0].name} 等 ${cases.length} 个 cases`;
+    return cases.length === 1 ? cases[0].name : `${cases[0].name} 等 ${cases.length} 组参数`;
   }
   function forced(current: BatchDetail) {
     return current.request.slow_attack_policy?.forced_attacks ?? [];
@@ -62,7 +56,7 @@
       if (response.etag) detailEtag = response.etag;
       if (response.data) detail = response.data;
     } catch (error) {
-      if (selected === batchId) message = String(error);
+      if (selected === batchId) message = userMessage(error);
     }
     if (selected === batchId && !terminal(detail?.state.kind)) {
       const delay = Math.max(1, detail?.poll_after_seconds ?? 1) * 1000;
@@ -91,7 +85,7 @@
       await refreshList();
       message = `已删除 ${ids.length} 个批次`;
     } catch (error) {
-      message = String(error);
+      message = userMessage(error);
     } finally {
       deleting = false;
     }
@@ -101,16 +95,16 @@
       await api(path, { method });
       detailEtag = '';
       await Promise.all([refreshList(), pollDetail()]);
-    } catch (error) { message = String(error); }
+    } catch (error) { message = userMessage(error); }
   }
   async function exportReport() {
     if (!detail || !terminal(detail.state.kind) || !detail.report) return;
     try { download(`${selected}.lattice-report.json`, await api(`/v1/batches/${selected}/export`)); }
-    catch (error) { message = String(error); }
+    catch (error) { message = userMessage(error); }
   }
 
   onMount(() => {
-    refreshList().catch(error => message = String(error));
+    refreshList().catch(error => message = userMessage(error));
     const listTimer = window.setInterval(() => refreshList().catch(() => {}), 2500);
     return () => {
       window.clearInterval(listTimer);
@@ -121,7 +115,7 @@
 
 <div class="split runs">
   <aside class="panel list-pane">
-    <header><div><p class="eyebrow">RUN HISTORY</p><h2>运行批次</h2></div><button on:click={refreshList}>刷新</button></header>
+    <header><div><p class="eyebrow">运行历史</p><h2>运行批次</h2></div><button on:click={refreshList}>刷新</button></header>
     {#if records.length > 0}
       <div class="bulk-toolbar">
         <button class="ghost" disabled={deleting || deletableIds.length === 0} on:click={toggleAll}>{allDeletableChecked ? '取消全选' : '全选可删除项'}</button>
@@ -136,7 +130,7 @@
         </label>
         <button class:selected={selected === record.batch_id} class="list-item" on:click={() => selectBatch(record.batch_id)}>
           <span class="row"><strong>{record.name}</strong><span class="status {record.state.kind}">{stateName(record.state)}</span></span>
-          <span>{record.parameter_set_id ? `方案 ${record.parameter_set_id} · ` : ''}{record.case_count} cases · {new Date(record.updated_at).toLocaleString()}</span>
+          <span>{record.parameter_set_id ? `方案 ${record.parameter_set_id} · ` : ''}{record.case_count} 组参数 · {new Date(record.updated_at).toLocaleString()}</span>
         </button>
       </div>
     {/each}
@@ -145,9 +139,9 @@
     {#if detail}
       <header>
         <div>
-          <p class="eyebrow">BATCH DETAIL</p>
+          <p class="eyebrow">批次详情</p>
           <h2>{runTitle(detail)}</h2>
-          <div class="run-meta"><code>{detail.batch_id}</code><span>revision {detail.revision}</span><span class="status {detail.state.kind}">{stateName(detail.state)}</span></div>
+          <div class="run-meta"><code>{detail.batch_id}</code><span>修订 {detail.revision}</span><span class="status {detail.state.kind}">{stateName(detail.state)}</span></div>
           {#if forced(detail).length}<div class="forced-badges"><span>手动慢攻击</span>{#each forced(detail) as attack}<code>{attack}</code>{/each}</div>{/if}
         </div>
         <div class="actions">
@@ -162,7 +156,7 @@
         {@const result = progress?.result ?? detail.report?.reports.find(item => item.case.id === parameter.id)}
         <article class="result-card">
           <header>
-            <div><p class="eyebrow">CASE {index + 1}</p><h3>{parameter.name}</h3><div class="run-meta"><code>{parameter.id}</code><span class="status {progress?.state.kind ?? 'queued'}">{stateName(progress?.state)}</span></div></div>
+            <div><p class="eyebrow">第 {index + 1} 组参数</p><h3>{parameter.name}</h3><div class="run-meta"><code>{parameter.id}</code><span class="status {progress?.state.kind ?? 'queued'}">{stateName(progress?.state)}</span></div></div>
             <span class="security-bit">
               {#if result?.summary.security_bits}<small>{terminal(progress?.state.kind) ? '安全' : '当前最低'}</small><strong>{bits(result.summary.security_bits)} bit</strong>{:else}<strong>—</strong>{/if}
             </span>
@@ -174,15 +168,17 @@
               {#each result.attacks as attackResult}
                 <div class="attack">
                   <span>{attackResult.attack}</span><strong>{bits(attackResult.outcome.security_bits)}</strong>
-                  <small>{attackResult.outcome.kind}{attackResult.cached ? ' · cached' : ''}</small>
-                  {#if reason(attackResult)}<small title={reason(attackResult)}>{reason(attackResult)}</small>{/if}
+                  <small>{outcomeName(attackResult)}</small>
+                  {#if attackResult.outcome.code || technicalDetail(attackResult)}
+                    <details><summary>技术详情</summary><small>{attackResult.outcome.code ?? ''}{attackResult.outcome.code && technicalDetail(attackResult) ? '：' : ''}{technicalDetail(attackResult)}</small></details>
+                  {/if}
                 </div>
               {/each}
             </div>
             {#each result.summary.warnings as warning}<p class="warning">{warning}</p>{/each}
             {#if !terminal(progress?.state.kind)}<p class="empty progress-waiting">正在等待其余 Sage 进程返回…</p>{/if}
           {:else}
-            <p class="empty">{terminal(progress?.state.kind) ? String(progress?.state.message ?? '这个 Case 没有生成结果。') : '等待攻击结果…'}</p>
+            <p class="empty">{terminal(progress?.state.kind) ? '这组参数没有生成攻击结果。' : '等待攻击结果…'}</p>
           {/if}
         </article>
       {/each}

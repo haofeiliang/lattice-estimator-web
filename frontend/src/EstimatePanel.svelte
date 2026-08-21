@@ -1,6 +1,6 @@
 <script lang="ts">
   import CaseEditor from './CaseEditor.svelte';
-  import { api, ApiError } from './api';
+  import { api, ApiError, userMessage } from './api';
   import { appendFreshDraft, caseFromDraft, freshDraft, freshIdentifier } from './drafts';
   import type { CaseDraft } from './drafts';
   import type { EstimateRequest, ParameterSet } from './types';
@@ -13,7 +13,7 @@
   let forceAroraGb = false;
   let forceBkw = false;
   let setId = freshIdentifier('scheme');
-  let setName = 'My scheme';
+  let setName = '新方案';
   let busy = false;
   let message = '';
   let savedSetId = false;
@@ -40,7 +40,7 @@
     try {
       const result = await api<{ batch_id: string }>('/v1/estimates', { method: 'POST', body: JSON.stringify(request()) });
       message = `已创建批次 ${result.batch_id}`;
-    } catch (error) { message = String(error); }
+    } catch (error) { message = userMessage(error); }
     finally { busy = false; }
   }
 
@@ -67,16 +67,16 @@
       }
       savedSetId = true;
       message = `方案 ${setId} 已保存`;
-    } catch (error) { message = String(error); }
+    } catch (error) { message = userMessage(error); }
     finally { busy = false; }
   }
 </script>
 
 <section class="panel intro">
   <div>
-    <p class="eyebrow">SECURITY ESTIMATE</p>
+    <p class="eyebrow">安全估算</p>
     <h2>直接输入多组参数</h2>
-    <p>快速模式只运行 primal/BDD 与 dual；正常模式会先运行快速攻击，再按适用域和安全余量决定是否运行 Arora-GB、BKW。</p>
+    <p>快速模式只运行 primal/BDD 与 dual；正常模式会先运行快速攻击，再按适用范围和安全余量决定是否运行 Arora-GB、BKW。</p>
   </div>
   <div class="mode-switch" aria-label="估算模式">
     <button class:active={mode === 'rough'} on:click={() => mode = 'rough'}>快速</button>
