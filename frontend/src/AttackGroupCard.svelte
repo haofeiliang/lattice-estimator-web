@@ -1,3 +1,4 @@
+<!-- Compact result table for attacks returned by the same Sage request group. -->
 <script lang="ts">
   import { formatDuration, outcomeName } from './display';
   import type { AttackResult, ExecutionTiming } from './types';

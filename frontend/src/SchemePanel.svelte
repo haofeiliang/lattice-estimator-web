@@ -1,3 +1,4 @@
+<!-- Scheme-library CRUD and scheme-level parameter editing workflow. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import CaseEditor from './CaseEditor.svelte';

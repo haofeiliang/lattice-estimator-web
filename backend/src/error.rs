@@ -1,3 +1,5 @@
+//! Service-wide errors and their stable HTTP error-envelope mapping.
+
 use std::collections::BTreeMap;
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
@@ -7,6 +9,7 @@ use uuid::Uuid;
 use crate::{ErrorEnvelope, ValidationError};
 
 #[derive(Debug, thiserror::Error)]
+/// Failures shared across validation, persistence, scheduler, upstream, and HTTP layers.
 pub enum ServiceError {
     #[error("{0}")]
     Invalid(ValidationError),

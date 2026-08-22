@@ -1,3 +1,5 @@
+//! Generate or verify checked-in v2 JSON Schemas from Rust domain types.
+
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use lattice_estimator_web::{ParameterSetFile, SecurityReportFile};

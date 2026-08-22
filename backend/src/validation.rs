@@ -1,3 +1,7 @@
+//! Cross-field validation for parameter sets, estimate requests, and reports.
+//!
+//! Serde checks shape; this module checks semantic constraints and compatible settings.
+
 use std::collections::{BTreeSet, HashSet};
 
 use num_traits::One;
@@ -16,12 +20,14 @@ use crate::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Error)]
 #[error("{path}: {message}")]
+/// One semantic validation failure with a stable field path.
 pub struct ValidationError {
     pub path: String,
     pub message: String,
 }
 
 impl ValidationError {
+    /// Construct a validation failure at a JSONPath-like location.
     pub fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -39,7 +45,9 @@ impl ValidationError {
     }
 }
 
+/// Semantic validation performed after successful JSON deserialization.
 pub trait Validate {
+    /// Check cross-field and domain invariants without mutating the value.
     fn validate(&self) -> Result<(), ValidationError>;
 }
 

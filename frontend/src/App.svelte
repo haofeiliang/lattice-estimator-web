@@ -1,3 +1,4 @@
+<!-- Root shell: keeps the selected top-level panel in the URL for refresh/navigation. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import EstimatePanel from './EstimatePanel.svelte';

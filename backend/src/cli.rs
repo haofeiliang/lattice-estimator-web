@@ -5,6 +5,7 @@ use std::{env, fs};
 use reqwest::{Client, Method, Url};
 use serde_json::Value;
 
+/// Parse CLI arguments and execute the selected HTTP operation.
 pub async fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), String> {
     let mut arguments = arguments.into_iter();
     let _program = arguments.next();

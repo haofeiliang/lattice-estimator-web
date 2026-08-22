@@ -1,5 +1,7 @@
+/** Chinese labels and consistent duration formatting for report presentation. */
 import type { AttackResult, RunState } from './types';
 
+/** Translate persistent batch/job state to its user-facing label. */
 export function stateName(state?: RunState): string {
   return ({
     queued: '等待中',
@@ -14,6 +16,7 @@ export function stateName(state?: RunState): string {
   } as Record<string, string>)[state?.kind ?? ''] ?? '未知状态';
 }
 
+/** Translate an attack outcome without translating the attack identifier. */
 export function outcomeName(result: AttackResult): string {
   switch (result.outcome.kind) {
     case 'computed': return result.cached ? '已计算（来自缓存）' : '已计算';
@@ -30,6 +33,7 @@ export function outcomeName(result: AttackResult): string {
   }
 }
 
+/** Format milliseconds as <1 ms, ms, seconds, or minutes. */
 export function formatDuration(durationMs?: number): string {
   if (durationMs === undefined) return '—';
   if (durationMs < 1) return '<1 ms';

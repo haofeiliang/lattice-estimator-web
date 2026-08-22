@@ -1,5 +1,8 @@
+// Frontend mirror of the current Rust JSON contract; no legacy response shapes.
+/** Persistent batch or case lifecycle state with variant-specific timestamps. */
 export type RunState = { kind: string; [key: string]: unknown };
 
+/** Secret or error coefficient distribution accepted by the current API. */
 export type Distribution =
   | { kind: 'uniform_binary' }
   | { kind: 'uniform_ternary' }
@@ -10,6 +13,7 @@ export type Distribution =
   | { kind: 'centered_binomial'; eta: number }
   | { kind: 'uniform_integer'; lower: string; upper: string };
 
+/** Public problem families edited by the browser UI. */
 export type Problem = {
   kind: string;
   dimension?: number;
@@ -24,6 +28,7 @@ export type Problem = {
   structure?: string;
 };
 
+/** One named problem and analysis choice inside a parameter set. */
 export type ParameterCase = {
   id: string;
   name: string;
@@ -33,6 +38,7 @@ export type ParameterCase = {
   analysis: Record<string, unknown>;
 };
 
+/** Importable/exportable version-2 scheme document. */
 export type ParameterSet = {
   format: 'lattice-estimator/parameter-set';
   version: 2;
@@ -43,6 +49,7 @@ export type ParameterSet = {
   cases: ParameterCase[];
 };
 
+/** Batch submission contract sent to the Rust backend. */
 export type EstimateRequest = {
   name?: string;
   parameter_set_id?: string;
@@ -58,6 +65,7 @@ export type EstimateRequest = {
   };
 };
 
+/** Scheme source retained while editing and rerunning an existing batch. */
 export type EstimateDraftSource = {
   sequence: number;
   batchId: string;
@@ -65,6 +73,7 @@ export type EstimateDraftSource = {
   focusCaseId?: string;
 };
 
+/** Final attack outcome with cache and execution-timing metadata. */
 export type AttackResult = {
   attack: string;
   cached: boolean;
@@ -72,12 +81,14 @@ export type AttackResult = {
   outcome: { kind: string; security_bits?: string; reason?: string; message?: string; code?: string };
 };
 
+/** Real worker duration and whether it belongs to a shared attack group. */
 export type ExecutionTiming = {
   duration_ms: number;
   scope: 'attack' | 'request_group';
   shared_attacks?: string[];
 };
 
+/** Auditable slow-attack scheduling trace, never a final security conclusion. */
 export type PreflightTrace =
   | {
       kind: 'threshold_screen'; precision_tier: 'coarse' | 'refined';
@@ -97,10 +108,13 @@ export type PreflightTrace =
   | { kind: 'failed'; code: string; message: string; timing?: ExecutionTiming; decision: 'run_exact' }
   | { kind: 'not_run'; code: string; reason: string };
 
+/** Preflight trace paired with its canonical attack name. */
 export type AttackPreflight = { attack: string; trace: PreflightTrace };
 
+/** Case wall-clock interval excluding its initial queue wait. */
 export type CaseExecutionTiming = { started_at: string; finished_at?: string };
 
+/** Progressive or final report data for one parameter case. */
 export type ReportEntry = {
   case: ParameterCase;
   execution: CaseExecutionTiming;
@@ -109,6 +123,7 @@ export type ReportEntry = {
   attacks: AttackResult[];
 };
 
+/** Current independently pollable progress of one batch case. */
 export type CaseProgress = {
   case_id: string;
   case_index: number;
@@ -121,6 +136,7 @@ export type CaseProgress = {
   result?: ReportEntry;
 };
 
+/** Lightweight item shown in the batch list. */
 export type BatchSummary = {
   batch_id: string;
   name: string;
@@ -132,6 +148,7 @@ export type BatchSummary = {
   updated_at: string;
 };
 
+/** ETag-polled batch detail including all cases and optional final report. */
 export type BatchDetail = {
   batch_id: string;
   state: RunState;
@@ -144,4 +161,5 @@ export type BatchDetail = {
   report?: { reports: ReportEntry[] };
 };
 
+/** Lightweight item shown in the scheme library. */
 export type ParameterSetSummary = { id: string; name: string; version: number; case_count: number; created_at: string };

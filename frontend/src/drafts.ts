@@ -1,8 +1,10 @@
+/** Editable UI draft types and lossless conversion to/from strict API cases. */
 import type { Distribution, ParameterCase, Problem } from './types';
 
 export type ProblemKind = 'lwe' | 'rlwe' | 'glwe' | 'ntru' | 'sis';
 export type DistributionKind = Distribution['kind'];
 
+/** String-oriented editable form state before strict API conversion. */
 export type CaseDraft = {
   id: string;
   name: string;
@@ -34,12 +36,14 @@ export type CaseDraft = {
   analysis: Record<string, unknown>;
 };
 
+/** Generate a locally unique, readable case or scheme identifier. */
 export function freshIdentifier(prefix: 'case' | 'scheme'): string {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
   const suffix = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
   return `${prefix}-${suffix}`;
 }
 
+/** Create one initialized LWE editor draft. */
 export function freshDraft(index: number): CaseDraft {
   return {
     id: freshIdentifier('case'),
@@ -73,6 +77,7 @@ export function freshDraft(index: number): CaseDraft {
   };
 }
 
+/** Append a case whose generated ID does not collide with current drafts. */
 export function appendFreshDraft(drafts: CaseDraft[]): CaseDraft[] {
   let draft: CaseDraft;
   do {
@@ -81,6 +86,7 @@ export function appendFreshDraft(drafts: CaseDraft[]): CaseDraft[] {
   return [...drafts, draft];
 }
 
+/** Convert a strict persisted case into editable string fields. */
 export function draftFromCase(parameter: ParameterCase): CaseDraft {
   const draft = freshDraft(1);
   const problem = parameter.problem;
@@ -112,6 +118,7 @@ export function draftFromCase(parameter: ParameterCase): CaseDraft {
   return draft;
 }
 
+/** Convert editor strings to the strict request shape or throw validation text. */
 export function caseFromDraft(draft: CaseDraft): ParameterCase {
   const samples = draft.samples.trim().toLowerCase() === 'unlimited'
     ? { kind: 'unlimited' as const }
@@ -170,6 +177,7 @@ export function caseFromDraft(draft: CaseDraft): ParameterCase {
   };
 }
 
+/** Parse a comma-separated tag field, trimming and removing empty entries. */
 export function commaList(value: string): string[] {
   return value.split(',').map(item => item.trim()).filter(Boolean);
 }

@@ -1,3 +1,7 @@
+//! `lattice-estimator-web` process entry point.
+//!
+//! Loads configuration, constructs shared state, binds TCP, and starts Axum.
+
 use lattice_estimator_web::{api, service::AppConfig};
 use tracing_subscriber::EnvFilter;
 

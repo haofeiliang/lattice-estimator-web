@@ -1,3 +1,8 @@
+//! Axum HTTP routes for batches, parameter sets, reports, and static Web assets.
+//!
+//! Handlers decode HTTP input, call [`crate::application::Application`], and map
+//! results to status codes, JSON, ETags, or downloadable files.
+
 use std::sync::Arc;
 
 use axum::{
@@ -24,6 +29,9 @@ use crate::{
 
 const REQUEST_BODY_LIMIT: usize = 8 * 1024 * 1024;
 
+/// Build the complete authenticated API and browser-asset router.
+///
+/// This is the authoritative list of HTTP paths exposed by the Web service.
 pub fn router(state: Arc<AppState>) -> Router {
     let token = state.api_token.clone();
     let api = Router::new()
@@ -56,6 +64,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     api.merge(crate::web::routes(&state.web_dir))
 }
 
+/// Enforce the optional bearer token before any API or static route runs.
 async fn authenticate(
     State(token): State<Option<String>>,
     headers: HeaderMap,
@@ -76,18 +85,22 @@ async fn authenticate(
 }
 
 #[derive(Serialize)]
+/// Minimal liveness response that does not contact SQLite or estimator-api.
 struct Health<'a> {
     status: &'a str,
 }
 
+/// Return process liveness for container health checks.
 async fn health() -> Json<Health<'static>> {
     Json(Health { status: "ok" })
 }
 
+/// Return cached upstream capabilities and active policy-rule version.
 async fn metadata(State(state): State<Arc<AppState>>) -> Json<crate::upstream::Metadata> {
     Json(state.application.metadata().clone())
 }
 
+/// Decode and submit a new batch-estimation request.
 async fn estimate(
     State(state): State<Arc<AppState>>,
     payload: Result<Json<EstimateRequest>, JsonRejection>,
@@ -96,6 +109,7 @@ async fn estimate(
     submit(&state, request).await
 }
 
+/// Select 200 for fully cached submissions or 202 for scheduled work.
 async fn submit(state: &AppState, request: EstimateRequest) -> Result<Response, ServiceError> {
     let submission = state.application.estimate(request).await?;
     let status = if submission.fully_cached {
@@ -106,6 +120,7 @@ async fn submit(state: &AppState, request: EstimateRequest) -> Result<Response, 
     snapshot_response(status, submission.snapshot)
 }
 
+/// Return full progressive batch detail with conditional ETag support.
 async fn batch(
     State(state): State<Arc<AppState>>,
     Path(batch_id): Path<String>,
@@ -129,12 +144,14 @@ async fn batch(
     detail_response(StatusCode::OK, detail)
 }
 
+/// Return lightweight summaries for the batch list.
 async fn batches(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<crate::application::BatchSummary>>, ServiceError> {
     Ok(Json(state.application.batches().await?))
 }
 
+/// Serialize batch detail and attach its revision-based ETag.
 fn detail_response(status: StatusCode, detail: BatchDetail) -> Result<Response, ServiceError> {
     let etag = format!("\"{}\"", detail.revision);
     let mut response = (status, Json(detail)).into_response();
@@ -145,6 +162,7 @@ fn detail_response(status: StatusCode, detail: BatchDetail) -> Result<Response, 
     Ok(response)
 }
 
+/// Delete one batch history.
 async fn delete_batch(
     State(state): State<Arc<AppState>>,
     Path(batch_id): Path<String>,
@@ -154,10 +172,12 @@ async fn delete_batch(
 }
 
 #[derive(Deserialize)]
+/// Bounded list of public IDs accepted by bulk-delete endpoints.
 struct BulkDeleteRequest {
     ids: Vec<String>,
 }
 
+/// Validate non-empty, bounded, duplicate-free bulk-delete IDs.
 fn bulk_delete_ids(
     payload: Result<Json<BulkDeleteRequest>, JsonRejection>,
 ) -> Result<Vec<String>, ServiceError> {
@@ -176,6 +196,7 @@ fn bulk_delete_ids(
     Ok(request.ids)
 }
 
+/// Delete selected batch histories atomically.
 async fn delete_batches(
     State(state): State<Arc<AppState>>,
     payload: Result<Json<BulkDeleteRequest>, JsonRejection>,
@@ -187,6 +208,7 @@ async fn delete_batches(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Serialize a mutation snapshot and attach its revision-based ETag.
 fn snapshot_response(
     status: StatusCode,
     snapshot: BatchSnapshot,
@@ -200,6 +222,7 @@ fn snapshot_response(
     Ok(response)
 }
 
+/// Request cancellation of all unfinished jobs in a batch.
 async fn cancel(
     State(state): State<Arc<AppState>>,
     Path(batch_id): Path<String>,
@@ -208,6 +231,7 @@ async fn cancel(
     snapshot_response(StatusCode::OK, snapshot)
 }
 
+/// Resubmit a batch's original request as a new batch.
 async fn rerun(
     State(state): State<Arc<AppState>>,
     Path(batch_id): Path<String>,
@@ -221,6 +245,7 @@ async fn rerun(
     snapshot_response(status, submission.snapshot)
 }
 
+/// Queue an exact Arora-GB or BKW run within an existing case.
 async fn force_exact_attack(
     State(state): State<Arc<AppState>>,
     Path((batch_id, case_id, attack)): Path<(String, String, String)>,
@@ -241,6 +266,7 @@ async fn force_exact_attack(
     snapshot_response(StatusCode::ACCEPTED, snapshot)
 }
 
+/// Download a report only after the batch becomes terminal.
 async fn export_report(
     State(state): State<Arc<AppState>>,
     Path(batch_id): Path<String>,
@@ -250,12 +276,14 @@ async fn export_report(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Import behavior when a parameter-set ID already exists.
 enum ConflictPolicy {
     Reject,
     Replace,
 }
 
 #[derive(Deserialize)]
+/// Query parameters controlling parameter-set conflict behavior.
 struct ImportQuery {
     #[serde(default = "reject")]
     conflict: ConflictPolicy,
@@ -265,6 +293,7 @@ const fn reject() -> ConflictPolicy {
     ConflictPolicy::Reject
 }
 
+/// Validate and store a v2 parameter-set document.
 async fn import_parameter_set(
     State(state): State<Arc<AppState>>,
     query: Result<Query<ImportQuery>, QueryRejection>,
@@ -282,12 +311,14 @@ async fn import_parameter_set(
     Ok((StatusCode::CREATED, Json(imported)).into_response())
 }
 
+/// List saved parameter-set summaries.
 async fn parameter_sets(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<crate::application::ParameterSetSummary>>, ServiceError> {
     Ok(Json(state.application.parameter_sets().await?))
 }
 
+/// Convert Axum JSON rejection details to the stable service error shape.
 fn json_payload<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ServiceError> {
     match payload {
         Ok(Json(value)) => Ok(value),
@@ -298,6 +329,7 @@ fn json_payload<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, Service
     }
 }
 
+/// Download one saved v2 parameter-set document.
 async fn export_parameter_set(
     State(state): State<Arc<AppState>>,
     Path(parameter_set_id): Path<String>,
@@ -307,6 +339,7 @@ async fn export_parameter_set(
     ))
 }
 
+/// Delete one saved parameter set.
 async fn delete_parameter_set(
     State(state): State<Arc<AppState>>,
     Path(parameter_set_id): Path<String>,
@@ -318,6 +351,7 @@ async fn delete_parameter_set(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Delete selected saved parameter sets atomically.
 async fn delete_parameter_sets(
     State(state): State<Arc<AppState>>,
     payload: Result<Json<BulkDeleteRequest>, JsonRejection>,
@@ -329,12 +363,14 @@ async fn delete_parameter_sets(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Serve the router until SIGINT or SIGTERM requests graceful shutdown.
 pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> std::io::Result<()> {
     axum::serve(listener, router(state).into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await
 }
 
+/// Resolve on Ctrl-C or Unix SIGTERM for graceful server shutdown.
 async fn shutdown_signal() {
     let control_c = async {
         if let Err(error) = tokio::signal::ctrl_c().await {

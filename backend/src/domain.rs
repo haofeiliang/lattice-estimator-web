@@ -1,3 +1,7 @@
+//! Core parameter, distribution, attack, analysis, timing, and outcome types.
+//!
+//! Shared by persistence, scheduling, public formats, and the estimator adapter.
+
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use bigdecimal::BigDecimal;
@@ -15,6 +19,7 @@ use crate::validation::ValidationError;
 pub struct PositiveInteger(#[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))] String);
 
 impl PositiveInteger {
+    /// Parse and canonicalize a non-negative base-10 integer string.
     pub fn new(value: impl AsRef<str>) -> Result<Self, String> {
         let value = value.as_ref();
         if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -28,10 +33,12 @@ impl PositiveInteger {
         }))
     }
 
+    /// Borrow the canonical decimal representation used on the wire.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Convert the validated value to an arbitrary-precision integer.
     pub fn as_biguint(&self) -> BigUint {
         BigUint::from_str(&self.0).expect("validated decimal integer")
     }
@@ -60,6 +67,7 @@ impl fmt::Display for PositiveInteger {
 pub struct SignedInteger(#[schemars(regex(pattern = r"^(0|-?[1-9][0-9]*)$"))] String);
 
 impl SignedInteger {
+    /// Parse and canonicalize a signed base-10 integer string.
     pub fn new(value: impl AsRef<str>) -> Result<Self, String> {
         let value = value.as_ref();
         let (negative, digits) = match value.strip_prefix('-') {
@@ -80,6 +88,7 @@ impl SignedInteger {
         }))
     }
 
+    /// Convert the validated value to an arbitrary-precision signed integer.
     pub fn as_bigint(&self) -> BigInt {
         BigInt::from_str(&self.0).expect("validated signed integer")
     }
@@ -105,6 +114,7 @@ pub struct ExactDecimal(
 );
 
 impl ExactDecimal {
+    /// Parse a finite plain decimal and remove redundant zeros.
     pub fn new(value: impl AsRef<str>) -> Result<Self, String> {
         let value = value.as_ref();
         if value.is_empty() || value.starts_with('+') || value.contains(['e', 'E']) {
@@ -144,14 +154,17 @@ impl ExactDecimal {
         Ok(Self(normalized))
     }
 
+    /// Borrow the canonical non-exponent decimal representation.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Convert the validated value without binary floating-point loss.
     pub fn as_big_decimal(&self) -> BigDecimal {
         BigDecimal::from_str(&self.0).expect("validated exact decimal")
     }
 
+    /// Return whether the exact value is strictly greater than zero.
     pub fn is_positive(&self) -> bool {
         self.as_big_decimal() > BigDecimal::zero()
     }
@@ -173,6 +186,7 @@ impl fmt::Display for ExactDecimal {
     }
 }
 
+/// Finite or estimator-defined unlimited sample availability.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SampleCount {
@@ -180,6 +194,7 @@ pub enum SampleCount {
     Unlimited,
 }
 
+/// Negacyclic polynomial ring metadata retained for structured problems.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NegacyclicRing {
@@ -188,6 +203,7 @@ pub struct NegacyclicRing {
     pub ciphertext_modulus: PositiveInteger,
 }
 
+/// Supported secret-coefficient distributions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretDistribution {
@@ -214,6 +230,7 @@ pub enum SecretDistribution {
     },
 }
 
+/// Supported error-coefficient distributions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ErrorDistribution {
@@ -231,6 +248,7 @@ pub enum ErrorDistribution {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Unstructured LWE parameters.
 pub struct LweProblem {
     #[schemars(range(min = 1))]
     pub dimension: u64,
@@ -242,6 +260,7 @@ pub struct LweProblem {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Ring-LWE parameters expressed using polynomial length and ring samples.
 pub struct RlweProblem {
     pub negacyclic_ring: NegacyclicRing,
     pub samples: SampleCount,
@@ -251,6 +270,7 @@ pub struct RlweProblem {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// GLWE parameters with polynomial length and vector dimension kept distinct.
 pub struct GlweProblem {
     pub negacyclic_ring: NegacyclicRing,
     #[schemars(range(min = 1))]
@@ -262,6 +282,7 @@ pub struct GlweProblem {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+/// Matrix or circulant interpretation of an NTRU instance.
 pub enum NtruStructure {
     Matrix,
     Circulant,
@@ -269,6 +290,7 @@ pub enum NtruStructure {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// NTRU parameters prior to reduction to the estimator's internal model.
 pub struct NtruProblem {
     #[schemars(range(min = 1))]
     pub dimension: u64,
@@ -280,6 +302,7 @@ pub struct NtruProblem {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+/// Norm used to interpret the SIS solution bound.
 pub enum SisNorm {
     L2,
     LInfinity,
@@ -287,6 +310,7 @@ pub enum SisNorm {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Short-integer-solution instance parameters.
 pub struct SisProblem {
     #[schemars(range(min = 1))]
     pub dimension: u64,
@@ -299,6 +323,7 @@ pub struct SisProblem {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Public problem variants accepted in parameter-set files and the UI.
 pub enum Problem {
     Lwe(LweProblem),
     Rlwe(RlweProblem),
@@ -318,12 +343,14 @@ pub enum EstimatorProblem {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+/// Security interpretation attached to a parameter case.
 pub enum SecurityModel {
     Classical,
     Quantum,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Lattice-reduction cost model selected for upstream estimation.
 pub enum ReductionCostModel {
     #[serde(rename = "BDGL16")]
     Bdgl16,
@@ -332,6 +359,7 @@ pub enum ReductionCostModel {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Gram-Schmidt shape assumption selected for upstream estimation.
 pub enum ReductionShapeModel {
     #[serde(rename = "GSA")]
     Gsa,
@@ -339,6 +367,7 @@ pub enum ReductionShapeModel {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+/// User-facing pairing of reduction cost and shape assumptions.
 pub enum ReductionModel {
     CoefficientEmbeddingV1,
 }
@@ -347,6 +376,7 @@ pub enum ReductionModel {
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+/// Canonical attack identifiers used in scheduling, caching, and reports.
 pub enum Attack {
     AroraGb,
     Bkw,
@@ -361,6 +391,7 @@ pub enum Attack {
 }
 
 impl Attack {
+    /// Canonical result order for LWE cases.
     pub const LWE: [Self; 8] = [
         Self::AroraGb,
         Self::Bkw,
@@ -371,6 +402,7 @@ impl Attack {
         Self::Dual,
         Self::DualHybrid,
     ];
+    /// LWE attacks grouped into ordinary exact estimator requests.
     pub const LWE_FAST: [Self; 6] = [
         Self::Usvp,
         Self::Bdd,
@@ -379,7 +411,9 @@ impl Attack {
         Self::Dual,
         Self::DualHybrid,
     ];
+    /// LWE attacks governed by dedicated preflight policy.
     pub const LWE_SLOW: [Self; 2] = [Self::AroraGb, Self::Bkw];
+    /// Canonical result order for NTRU cases.
     pub const NTRU: [Self; 5] = [
         Self::Usvp,
         Self::Dsd,
@@ -391,6 +425,7 @@ impl Attack {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Optional user analysis settings before defaults and problem reductions resolve.
 pub struct AnalysisSettings {
     pub security_model: SecurityModel,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -403,6 +438,7 @@ pub struct AnalysisSettings {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Concrete cost, shape, and classical/quantum settings sent upstream.
 pub struct ResolvedAnalysisSettings {
     pub security_model: SecurityModel,
     pub cost_model: ReductionCostModel,
@@ -423,6 +459,7 @@ impl Default for AnalysisSettings {
 }
 
 impl AnalysisSettings {
+    /// Apply defaults and return the settings used for cache identity and execution.
     pub fn resolve(&self) -> ResolvedAnalysisSettings {
         let cost_model = self.cost_model.unwrap_or(match self.security_model {
             SecurityModel::Classical => ReductionCostModel::Bdgl16,
@@ -438,6 +475,7 @@ impl AnalysisSettings {
     }
 }
 
+/// Return all attacks expected in the final report for a public problem.
 pub fn attacks_for_problem(problem: &Problem) -> &'static [Attack] {
     match problem {
         Problem::Lwe(_) | Problem::Rlwe(_) | Problem::Glwe(_) => &Attack::LWE,
@@ -446,6 +484,7 @@ pub fn attacks_for_problem(problem: &Problem) -> &'static [Attack] {
     }
 }
 
+/// Return attacks grouped into ordinary exact estimator requests.
 pub fn fast_attacks_for_problem(problem: &Problem) -> &'static [Attack] {
     match problem {
         Problem::Lwe(_) | Problem::Rlwe(_) | Problem::Glwe(_) => &Attack::LWE_FAST,
@@ -454,6 +493,7 @@ pub fn fast_attacks_for_problem(problem: &Problem) -> &'static [Attack] {
     }
 }
 
+/// Return attacks that use dedicated preflight scheduling policy.
 pub fn slow_attacks_for_problem(problem: &Problem) -> &'static [Attack] {
     match problem {
         Problem::Lwe(_) | Problem::Rlwe(_) | Problem::Glwe(_) => &Attack::LWE_SLOW,
@@ -463,6 +503,7 @@ pub fn slow_attacks_for_problem(problem: &Problem) -> &'static [Attack] {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Scalar diagnostic value safe to persist and expose as JSON.
 pub enum NormalizedMetric {
     Integer { value: SignedInteger },
     Decimal { value: ExactDecimal },
@@ -472,6 +513,7 @@ pub enum NormalizedMetric {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+/// Whether a duration belongs to one attack or a shared Sage request group.
 pub enum DurationScope {
     Attack,
     RequestGroup,
@@ -479,6 +521,7 @@ pub enum DurationScope {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Measured execution duration and optional shared-attack ownership.
 pub struct ExecutionTiming {
     pub duration_ms: u64,
     pub scope: DurationScope,
@@ -488,6 +531,7 @@ pub struct ExecutionTiming {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+/// Scheduling decision returned by a slow-attack preflight.
 pub enum PreflightDecision {
     RunExact,
     SkipExact,
@@ -495,6 +539,7 @@ pub enum PreflightDecision {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+/// Arora-GB v6 search tier that completed the threshold decision.
 pub enum PreflightPrecisionTier {
     Coarse,
     Refined,
@@ -502,6 +547,7 @@ pub enum PreflightPrecisionTier {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Auditable preflight result retained alongside any later exact result.
 pub enum PreflightTrace {
     ThresholdScreen {
         precision_tier: PreflightPrecisionTier,
@@ -548,6 +594,7 @@ pub enum PreflightTrace {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Wall-clock case execution interval excluding queue wait before first start.
 pub struct CaseExecutionTiming {
     pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -556,6 +603,7 @@ pub struct CaseExecutionTiming {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Stable final outcome of one attack in a security report.
 pub enum AttackOutcome {
     Computed {
         security_bits: ExactDecimal,
@@ -592,6 +640,7 @@ pub enum AttackOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Exact transformation used to reduce a public problem to an estimator problem.
 pub enum AnalysisModel {
     DirectLwe {
         version: u32,
@@ -611,6 +660,7 @@ pub enum AnalysisModel {
     },
 }
 
+/// Validate and reduce one public parameter case to the estimator API model.
 pub fn analysis_model_for(
     problem: &Problem,
     settings: &AnalysisSettings,

@@ -1,3 +1,8 @@
+//! Deterministic serialization and hashing for attack-cache identities.
+//!
+//! Keys include normalized parameters, analysis settings, attack identity, and
+//! estimator provenance; weakening this identity can return incorrect cached results.
+
 use std::{collections::BTreeMap, fmt::Write};
 
 use schemars::JsonSchema;
@@ -12,6 +17,7 @@ use crate::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Versions of the upstream estimator environment that produced a result.
 pub struct EstimatorContext {
     pub estimator_commit: String,
     pub sage_version: String,
@@ -21,6 +27,7 @@ pub struct EstimatorContext {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Complete semantic identity of one exact attack result in the cache.
 pub struct AttackCacheIdentity {
     pub canonicalization_version: u32,
     pub estimator_problem: EstimatorProblem,
@@ -31,6 +38,7 @@ pub struct AttackCacheIdentity {
 }
 
 impl AttackCacheIdentity {
+    /// Construct an identity from normalized problem and execution context.
     pub fn new(
         estimator_problem: EstimatorProblem,
         analysis_model: AnalysisModel,
@@ -48,16 +56,19 @@ impl AttackCacheIdentity {
         }
     }
 
+    /// Return the stable SHA-256 key used by the database cache.
     pub fn hash(&self) -> String {
         stable_hash(self)
     }
 }
 
+/// Serialize recursively key-sorted JSON with no insignificant whitespace.
 pub fn canonical_json<T: Serialize>(value: &T) -> String {
     let value = serde_json::to_value(value).expect("contract types serialize to JSON");
     serde_json::to_string(&canonicalize_value(value)).expect("canonical JSON value serializes")
 }
 
+/// Hash a value after canonical JSON serialization.
 pub fn stable_hash<T: Serialize>(value: &T) -> String {
     let digest = Sha256::digest(canonical_json(value).as_bytes());
     let mut encoded = String::with_capacity(digest.len() * 2);

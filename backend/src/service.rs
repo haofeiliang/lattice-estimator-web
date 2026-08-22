@@ -1,3 +1,7 @@
+//! Runtime configuration, shared application state, and batch lifecycle states.
+//!
+//! [`AppState::start`] wires SQLite, the estimator client, and scheduler together.
+
 use std::{path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
@@ -7,11 +11,15 @@ use crate::{
     database::Database, error::ServiceError, scheduler::Scheduler, upstream::EstimatorClient,
 };
 
+/// Hard backpressure limit across queued parameter-case jobs.
 pub const MAX_QUEUED_JOBS: usize = 2_000;
+/// Default number of parameter cases evaluated concurrently.
 pub const DEFAULT_CASE_CONCURRENCY: usize = 2;
+/// Default number of estimator HTTP requests allowed concurrently.
 pub const DEFAULT_ESTIMATOR_CONCURRENCY: usize = 3;
 
 #[derive(Clone, Debug)]
+/// Runtime settings loaded from `LATTICE_ESTIMATOR_WEB_*` environment variables.
 pub struct AppConfig {
     pub bind: String,
     pub database_path: PathBuf,
@@ -24,6 +32,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    /// Parse and validate all service environment variables.
     pub fn from_environment() -> Result<Self, ServiceError> {
         Ok(Self {
             bind: std::env::var("LATTICE_ESTIMATOR_WEB_BIND")
@@ -73,6 +82,7 @@ fn concurrency_from_environment(name: &str, default: usize) -> Result<usize, Ser
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Persistent lifecycle state shared by batches and jobs.
 pub enum RunState {
     Queued {
         queued_at: String,
@@ -107,6 +117,7 @@ pub enum RunState {
 }
 
 impl RunState {
+    /// Return the stable wire/database name of this state variant.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Queued { .. } => "queued",
@@ -121,6 +132,7 @@ impl RunState {
         }
     }
 
+    /// Return whether no more scheduler work is expected for this state.
     pub fn terminal(&self) -> bool {
         matches!(
             self,
@@ -134,6 +146,7 @@ impl RunState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Lightweight batch mutation response and optional terminal report.
 pub struct BatchSnapshot {
     pub batch_id: String,
     pub state: RunState,
@@ -165,6 +178,7 @@ pub(crate) struct JobSnapshot {
 }
 
 #[derive(Clone)]
+/// Dependencies shared by every Axum request handler.
 pub struct AppState {
     pub application: Application,
     pub api_token: Option<String>,
@@ -172,6 +186,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Open dependencies, verify upstream metadata, and start scheduler workers.
     pub async fn start(config: &AppConfig) -> Result<Arc<Self>, ServiceError> {
         let database = Database::open(&config.database_path)?;
         let upstream = EstimatorClient::new(&config.estimator_url)?;
@@ -195,6 +210,7 @@ impl AppState {
     }
 }
 
+/// Return UTC RFC 3339 time for persisted lifecycle events.
 pub fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)

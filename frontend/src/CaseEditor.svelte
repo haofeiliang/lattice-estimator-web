@@ -1,3 +1,4 @@
+<!-- Editable fields for one parameter case; parent panels own save/run operations. -->
 <script lang="ts">
   import type { CaseDraft } from './drafts';
 

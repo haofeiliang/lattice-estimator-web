@@ -1,3 +1,4 @@
+<!-- New-estimate workflow: edit cases, advanced policy, save a scheme, or submit a batch. -->
 <script lang="ts">
   import { tick } from 'svelte';
   import CaseEditor from './CaseEditor.svelte';

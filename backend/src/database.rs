@@ -1,3 +1,8 @@
+//! SQLite persistence for batches, jobs, partial results, caches, and parameter sets.
+//!
+//! Async methods send blocking SQLite work to one dedicated connection thread.
+//! Transactions keep job and batch revisions synchronized for reliable ETag polling.
+
 use std::{
     path::Path,
     sync::mpsc::{self, Sender},
@@ -21,11 +26,13 @@ type DbResult<T> = Result<T, ServiceError>;
 type Command = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
 #[derive(Clone)]
+/// Cloneable asynchronous handle to the dedicated SQLite connection thread.
 pub struct Database {
     sender: Sender<Command>,
 }
 
 #[derive(Clone, Debug)]
+/// Immutable inputs claimed by a scheduler worker for one parameter case.
 pub struct JobWork {
     pub job_id: String,
     pub batch_id: String,
@@ -38,12 +45,14 @@ pub struct JobWork {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Exact attack outcome and original timing loaded from the semantic cache.
 pub struct CachedOutcome {
     pub outcome: AttackOutcome,
     pub timing: Option<ExecutionTiming>,
 }
 
 #[derive(Clone, Debug)]
+/// Internal lightweight batch row used to build list summaries.
 pub(crate) struct BatchHeader {
     pub batch_id: String,
     pub request: EstimateRequest,
@@ -54,6 +63,7 @@ pub(crate) struct BatchHeader {
 }
 
 impl Database {
+    /// Open, initialize, and move a SQLite connection onto its worker thread.
     pub fn open(path: &Path) -> DbResult<Self> {
         if let Some(parent) = path
             .parent()
@@ -87,6 +97,7 @@ impl Database {
         Ok(Self { sender })
     }
 
+    /// Execute one closure serially on the database thread and await its result.
     async fn call<T, F>(&self, operation: F) -> DbResult<T>
     where
         T: Send + 'static,
@@ -103,6 +114,7 @@ impl Database {
             .map_err(|_| ServiceError::Database("database response dropped".to_owned()))?
     }
 
+    /// Persist a batch and one queued job per case in a single transaction.
     pub async fn create_batch(&self, request: EstimateRequest) -> DbResult<BatchSnapshot> {
         self.call(move |connection| {
             let transaction = connection.transaction().map_err(ServiceError::database)?;
@@ -167,6 +179,7 @@ impl Database {
         .await
     }
 
+    /// Load the lightweight snapshot returned after batch mutations.
     pub async fn batch(&self, batch_id: &str, poll_after_seconds: u64) -> DbResult<BatchSnapshot> {
         let batch_id = batch_id.to_owned();
         self.call(move |connection| load_batch(connection, &batch_id, poll_after_seconds))
@@ -243,6 +256,7 @@ impl Database {
             .await
     }
 
+    /// Return job IDs that should be offered to scheduler workers.
     pub async fn queued_jobs(&self) -> DbResult<Vec<String>> {
         self.call(|connection| {
             let mut statement = connection
@@ -259,6 +273,7 @@ impl Database {
         .await
     }
 
+    /// Atomically transition a queued job to running and return its work payload.
     pub async fn claim_job(&self, job_id: &str) -> DbResult<Option<JobWork>> {
         let job_id = job_id.to_owned();
         self.call(move |connection| {
@@ -479,6 +494,7 @@ impl Database {
         .await
     }
 
+    /// Clear stale partial state and put an interrupted job back in the queue.
     pub async fn requeue_job(&self, job_id: &str, reason: &str) -> DbResult<()> {
         let job_id = job_id.to_owned();
         let reason = reason.to_owned();
@@ -519,6 +535,7 @@ impl Database {
         .await
     }
 
+    /// Update scheduler liveness without inventing visible result progress.
     pub async fn heartbeat_job(&self, job_id: &str) -> DbResult<()> {
         let job_id = job_id.to_owned();
         self.call(move |connection| {
@@ -579,6 +596,7 @@ impl Database {
         .await
     }
 
+    /// Load case results in deterministic case order.
     pub async fn batch_results(&self, batch_id: &str) -> DbResult<Vec<SecurityReportEntry>> {
         let batch_id = batch_id.to_owned();
         self.call(move |connection| {
@@ -594,6 +612,7 @@ impl Database {
         .await
     }
 
+    /// Recover the original request used for rerun or detail display.
     pub async fn batch_request(&self, batch_id: &str) -> DbResult<EstimateRequest> {
         let batch_id = batch_id.to_owned();
         self.call(move |connection| {
@@ -746,6 +765,7 @@ impl Database {
         .await
     }
 
+    /// Delete selected batches and their jobs atomically.
     pub async fn delete_batches(&self, batch_ids: Vec<String>) -> DbResult<()> {
         self.call(move |connection| {
             let transaction = connection.transaction().map_err(ServiceError::database)?;
@@ -788,6 +808,7 @@ impl Database {
         .await
     }
 
+    /// Mark non-terminal work as cancellation-requested and update its revision.
     pub async fn request_cancel(&self, batch_id: &str) -> DbResult<BatchSnapshot> {
         let batch_id = batch_id.to_owned();
         self.call(move |connection| {
@@ -829,6 +850,7 @@ impl Database {
         }).await
     }
 
+    /// Check the persistent cancellation flag observed by running workers.
     pub async fn is_cancel_requested(&self, batch_id: &str) -> DbResult<bool> {
         let batch_id = batch_id.to_owned();
         self.call(move |connection| {
@@ -844,6 +866,7 @@ impl Database {
         .await
     }
 
+    /// Load an exact result by its full semantic cache key.
     pub async fn cached_outcome(&self, key: &str) -> DbResult<Option<CachedOutcome>> {
         let key = key.to_owned();
         self.call(move |connection| {
@@ -908,6 +931,7 @@ impl Database {
         }).await
     }
 
+    /// Reconstruct a stored v2 parameter-set document by public ID.
     pub async fn export_parameter_set(&self, external_id: &str) -> DbResult<ParameterSetFile> {
         let external_id = external_id.to_owned();
         self.call(move |connection| {
@@ -921,6 +945,7 @@ impl Database {
         }).await
     }
 
+    /// Delete selected parameter sets while preserving independent batch history.
     pub async fn delete_parameter_sets(&self, external_ids: Vec<String>) -> DbResult<()> {
         self.call(move |connection| {
             let transaction = connection.transaction().map_err(ServiceError::database)?;
@@ -951,6 +976,7 @@ impl Database {
         .await
     }
 
+    /// Return lightweight parameter-set rows for the scheme library.
     pub async fn list_parameter_sets(&self) -> DbResult<Vec<ParameterSetSummary>> {
         self.call(|connection| {
             let mut statement = connection
@@ -987,6 +1013,7 @@ impl Database {
     }
 }
 
+/// Apply connection settings and create the current experimental schema.
 fn initialize(connection: Connection) -> DbResult<Connection> {
     connection
         .busy_timeout(Duration::from_secs(5))
@@ -1139,6 +1166,7 @@ fn load_batch(
     })
 }
 
+/// Decode one job plus its partial/final result and forced-attack state.
 fn load_job(connection: &Connection, job_id: &str) -> DbResult<JobSnapshot> {
     let row = connection.query_row(
         "SELECT batch_id,case_id,case_index,state_json,revision,attempts,created_at,updated_at,result_json,
@@ -1194,10 +1222,12 @@ fn load_job_attacks(connection: &Connection, query: &str, job_id: &str) -> DbRes
         .collect()
 }
 
+/// Serialize a validated domain value for storage in a JSON column.
 fn json<T: serde::Serialize>(value: &T) -> DbResult<String> {
     serde_json::to_string(value).map_err(ServiceError::database)
 }
 
+/// Deserialize a trusted JSON column into its strongly typed domain value.
 fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> DbResult<T> {
     serde_json::from_str(value).map_err(ServiceError::database)
 }

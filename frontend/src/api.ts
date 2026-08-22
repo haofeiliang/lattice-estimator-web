@@ -1,6 +1,8 @@
+/** Typed fetch helpers, bearer-token storage, error mapping, and JSON downloads. */
 let token = sessionStorage.getItem('lattice-estimator-token') ?? '';
 
 export class ApiError extends Error {
+  /** HTTP failure with a stable backend error code and status. */
   constructor(
     message: string,
     readonly status: number,
@@ -11,6 +13,7 @@ export class ApiError extends Error {
   }
 }
 
+/** Convert transport and backend errors to concise Chinese UI messages. */
 export function userMessage(error: unknown): string {
   if (!(error instanceof ApiError)) {
     return error instanceof TypeError ? '网络请求失败，请检查服务是否可用' : '发生了未知错误';
@@ -29,20 +32,24 @@ export function userMessage(error: unknown): string {
   return error.code ? `${summary}（${error.code}）` : summary;
 }
 
+/** Update the bearer token for this browser tab. */
 export function setToken(value: string) {
   token = value.trim();
   if (token) sessionStorage.setItem('lattice-estimator-token', token);
   else sessionStorage.removeItem('lattice-estimator-token');
 }
 
+/** Return the bearer token currently scoped to this browser tab. */
 export function getToken() { return token; }
 
+/** JSON body plus response metadata needed for conditional polling. */
 export type ApiResponse<T> = {
   status: number;
   data?: T;
   etag?: string;
 };
 
+/** Fetch JSON while retaining status and ETag for conditional polling. */
 export async function apiResponse<T>(path: string, init: RequestInit = {}): Promise<ApiResponse<T>> {
   const headers = new Headers(init.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -62,10 +69,12 @@ export async function apiResponse<T>(path: string, init: RequestInit = {}): Prom
   return { status: response.status, data: await response.json(), etag };
 }
 
+/** Fetch only a decoded successful JSON body. */
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await apiResponse<T>(path, init)).data as T;
 }
 
+/** Download a JSON-compatible value without sending it back to the server. */
 export function download(name: string, value: unknown) {
   const link = document.createElement('a');
   link.href = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' }));

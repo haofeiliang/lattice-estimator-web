@@ -1,3 +1,4 @@
+<!-- Read-only compact rendering of one problem and its distributions. -->
 <script lang="ts">
   import type { Distribution, Problem } from './types';
 

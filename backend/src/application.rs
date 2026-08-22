@@ -15,6 +15,7 @@ use crate::{
 };
 
 #[derive(Clone)]
+/// Use-case facade joining validation, persistence, and scheduler operations.
 pub struct Application {
     database: Database,
     scheduler: SchedulerHandle,
@@ -22,12 +23,14 @@ pub struct Application {
     poll_after_seconds: u64,
 }
 
+/// Result of submitting or rerunning a batch.
 pub struct Submission {
     pub fully_cached: bool,
     pub snapshot: BatchSnapshot,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+/// Lightweight batch row returned by the low-frequency list endpoint.
 pub struct BatchSummary {
     pub batch_id: String,
     pub name: String,
@@ -41,6 +44,7 @@ pub struct BatchSummary {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+/// Current independently visible state of one case in a batch.
 pub struct CaseProgress {
     pub case_id: String,
     pub case_index: usize,
@@ -58,6 +62,7 @@ pub struct CaseProgress {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+/// Full batch state used by the ETag-aware detail endpoint.
 pub struct BatchDetail {
     pub batch_id: String,
     pub state: RunState,
@@ -72,12 +77,14 @@ pub struct BatchDetail {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+/// Public identity and revision returned after importing a parameter set.
 pub struct ImportedParameterSet {
     pub id: String,
     pub version: u64,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+/// Lightweight scheme-library row without the full parameter-set document.
 pub struct ParameterSetSummary {
     pub id: String,
     pub name: String,
@@ -87,6 +94,7 @@ pub struct ParameterSetSummary {
 }
 
 impl Application {
+    /// Construct the facade from initialized runtime dependencies.
     pub(crate) fn new(
         database: Database,
         scheduler: SchedulerHandle,
@@ -101,10 +109,12 @@ impl Application {
         }
     }
 
+    /// Return immutable upstream estimator capability metadata.
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
+    /// Validate and submit a new estimate request to the scheduler.
     pub async fn estimate(&self, request: EstimateRequest) -> Result<Submission, ServiceError> {
         request.validate()?;
         let (fully_cached, snapshot) = self
@@ -117,6 +127,7 @@ impl Application {
         })
     }
 
+    /// Assemble current batch, case, partial-result, and final-report state.
     pub async fn batch(&self, id: &str) -> Result<BatchDetail, ServiceError> {
         let (snapshot, request, jobs) = self
             .database
@@ -161,6 +172,7 @@ impl Application {
         })
     }
 
+    /// List recent batches without loading cases or reports.
     pub async fn batches(&self) -> Result<Vec<BatchSummary>, ServiceError> {
         Ok(self
             .database
@@ -184,14 +196,17 @@ impl Application {
             .collect())
     }
 
+    /// Request cancellation and return the resulting batch snapshot.
     pub async fn cancel(&self, id: &str) -> Result<BatchSnapshot, ServiceError> {
         self.scheduler.cancel(id, self.poll_after_seconds).await
     }
 
+    /// Submit the original request as a new run.
     pub async fn rerun(&self, id: &str) -> Result<Submission, ServiceError> {
         self.estimate(self.database.batch_request(id).await?).await
     }
 
+    /// Queue one previously skipped slow attack inside its existing batch and case.
     pub async fn force_exact_attack(
         &self,
         batch_id: &str,
@@ -203,6 +218,7 @@ impl Application {
             .await
     }
 
+    /// Return the final report, rejecting non-terminal or report-less batches.
     pub async fn report(&self, id: &str) -> Result<SecurityReportFile, ServiceError> {
         let detail = self.batch(id).await?;
         if !detail.state.terminal() {
@@ -215,22 +231,27 @@ impl Application {
         })
     }
 
+    /// Delete one batch through the same atomic bulk-delete path.
     pub async fn delete_batch(&self, id: String) -> Result<(), ServiceError> {
         self.delete_batches(vec![id]).await
     }
 
+    /// Delete selected batch histories.
     pub async fn delete_batches(&self, ids: Vec<String>) -> Result<(), ServiceError> {
         self.database.delete_batches(ids).await
     }
 
+    /// List saved parameter sets for the scheme library.
     pub async fn parameter_sets(&self) -> Result<Vec<ParameterSetSummary>, ServiceError> {
         self.database.list_parameter_sets().await
     }
 
+    /// Export one saved parameter set as a v2 document.
     pub async fn parameter_set(&self, id: &str) -> Result<ParameterSetFile, ServiceError> {
         self.database.export_parameter_set(id).await
     }
 
+    /// Validate and insert or explicitly replace a v2 parameter set.
     pub async fn import_parameter_set(
         &self,
         value: ParameterSetFile,
@@ -240,16 +261,19 @@ impl Application {
         self.database.import_parameter_set(value, replace).await
     }
 
+    /// Delete one saved parameter set.
     pub async fn delete_parameter_set(&self, id: &str) -> Result<(), ServiceError> {
         self.delete_parameter_sets(vec![id.to_owned()]).await
     }
 
+    /// Delete selected parameter sets atomically.
     pub async fn delete_parameter_sets(&self, ids: Vec<String>) -> Result<(), ServiceError> {
         self.database.delete_parameter_sets(ids).await
     }
 }
 
 fn default_run_name(request: &EstimateRequest) -> String {
+    // Keep generated names deterministic so list refreshes never rename a batch.
     match request.cases.as_slice() {
         [case] => case.name.clone(),
         [first, rest @ ..] => format!("{} 等 {} 个 cases", first.name, rest.len() + 1),

@@ -1,3 +1,4 @@
+<!-- Batch list/detail polling, progressive results, cancellation, rerun, and export UI. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, apiResponse, download, userMessage } from './api';

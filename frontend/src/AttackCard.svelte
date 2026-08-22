@@ -1,3 +1,4 @@
+<!-- Slow-attack card showing preflight decision, exact phase, timings, and force action. -->
 <script lang="ts">
   import { formatDuration, outcomeName } from './display';
   import type { AttackPreflight, AttackResult, ExecutionTiming, PreflightTrace } from './types';

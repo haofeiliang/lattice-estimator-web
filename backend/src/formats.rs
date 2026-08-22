@@ -1,3 +1,7 @@
+//! Version-2 parameter-set, estimate-request, and security-report wire formats.
+//!
+//! Validation lives in [`crate::validation`]; this module defines serialization shape.
+
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
@@ -10,6 +14,7 @@ use crate::domain::{
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// One named parameter choice and its analysis settings inside a scheme.
 pub struct ParameterCase {
     #[schemars(length(min = 1, max = 128), regex(pattern = r"^[A-Za-z0-9._-]+$"))]
     pub id: String,
@@ -26,6 +31,7 @@ pub struct ParameterCase {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Importable/exportable v2 collection of related parameter cases.
 pub struct ParameterSetFile {
     #[schemars(schema_with = "parameter_set_format_schema")]
     pub format: String,
@@ -45,6 +51,7 @@ pub struct ParameterSetFile {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Case-level minimum-security conclusion derived only from approved outcomes.
 pub struct SecuritySummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_bits: Option<ExactDecimal>,
@@ -59,6 +66,7 @@ pub struct SecuritySummary {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Final outcome, cache status, and timing for one attack.
 pub struct AttackResult {
     pub attack: Attack,
     #[serde(default)]
@@ -70,6 +78,7 @@ pub struct AttackResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Scheduling audit trail for one slow attack's fast screen.
 pub struct AttackPreflight {
     pub attack: Attack,
     pub trace: PreflightTrace,
@@ -77,6 +86,7 @@ pub struct AttackPreflight {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Estimator and analysis versions required to reproduce a report entry.
 pub struct Provenance {
     pub estimator_commit: String,
     pub sage_version: String,
@@ -89,6 +99,7 @@ pub struct Provenance {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Progressive or final analysis state for one parameter case.
 pub struct SecurityReportEntry {
     pub case: ParameterCase,
     pub execution: CaseExecutionTiming,
@@ -102,6 +113,7 @@ pub struct SecurityReportEntry {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Exportable v2 report created only after every batch case is terminal.
 pub struct SecurityReportFile {
     #[schemars(schema_with = "security_report_format_schema")]
     pub format: String,
@@ -119,6 +131,7 @@ pub struct SecurityReportFile {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Batch submission containing cases, execution mode, timeout, and slow-attack policy.
 pub struct EstimateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -135,6 +148,7 @@ pub struct EstimateRequest {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Requested balance between fast feedback and the complete attack set.
 pub enum EstimateMode {
     Rough,
     #[default]
@@ -143,6 +157,7 @@ pub enum EstimateMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Target and per-attack margins controlling reviewed preflight skips.
 pub struct SlowAttackPolicy {
     pub required_security_bits: ExactDecimal,
     pub arora_gb_coarse_margin_bits: ExactDecimal,
@@ -153,6 +168,7 @@ pub struct SlowAttackPolicy {
 }
 
 impl SlowAttackPolicy {
+    /// Return whether the user explicitly requires an exact execution.
     pub fn forces(&self, attack: Attack) -> bool {
         self.forced_attacks.contains(&attack)
     }
@@ -160,6 +176,7 @@ impl SlowAttackPolicy {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Stable JSON error body returned by the Web HTTP API.
 pub struct ErrorEnvelope {
     pub code: String,
     pub message: String,

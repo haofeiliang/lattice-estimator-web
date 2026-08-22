@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ParameterSetFile",
+  "description": "Importable/exportable v2 collection of related parameter cases.",
   "type": "object",
   "properties": {
     "cases": {
@@ -53,6 +54,7 @@
   ],
   "$defs": {
     "AnalysisSettings": {
+      "description": "Optional user analysis settings before defaults and problem reductions resolve.",
       "type": "object",
       "properties": {
         "cost_model": {
@@ -95,6 +97,7 @@
       ]
     },
     "ErrorDistribution": {
+      "description": "Supported error-coefficient distributions.",
       "oneOf": [
         {
           "type": "object",
@@ -161,6 +164,7 @@
       "pattern": "^(?:0|-?(?:0\\.[0-9]*[1-9]|[1-9][0-9]*(?:\\.[0-9]*[1-9])?))$"
     },
     "NegacyclicRing": {
+      "description": "Negacyclic polynomial ring metadata retained for structured problems.",
       "type": "object",
       "properties": {
         "ciphertext_modulus": {
@@ -179,6 +183,7 @@
       ]
     },
     "NtruStructure": {
+      "description": "Matrix or circulant interpretation of an NTRU instance.",
       "type": "string",
       "enum": [
         "matrix",
@@ -186,6 +191,7 @@
       ]
     },
     "ParameterCase": {
+      "description": "One named parameter choice and its analysis settings inside a scheme.",
       "type": "object",
       "properties": {
         "analysis": {
@@ -234,8 +240,10 @@
       "pattern": "^(0|[1-9][0-9]*)$"
     },
     "Problem": {
+      "description": "Public problem variants accepted in parameter-set files and the UI.",
       "oneOf": [
         {
+          "description": "Unstructured LWE parameters.",
           "type": "object",
           "properties": {
             "dimension": {
@@ -271,6 +279,7 @@
           ]
         },
         {
+          "description": "Ring-LWE parameters expressed using polynomial length and ring samples.",
           "type": "object",
           "properties": {
             "error": {
@@ -300,6 +309,7 @@
           ]
         },
         {
+          "description": "GLWE parameters with polynomial length and vector dimension kept distinct.",
           "type": "object",
           "properties": {
             "dimension": {
@@ -335,6 +345,7 @@
           ]
         },
         {
+          "description": "NTRU parameters prior to reduction to the estimator's internal model.",
           "type": "object",
           "properties": {
             "dimension": {
@@ -370,6 +381,7 @@
           ]
         },
         {
+          "description": "Short-integer-solution instance parameters.",
           "type": "object",
           "properties": {
             "columns": {
@@ -409,6 +421,7 @@
       ]
     },
     "ReductionCostModel": {
+      "description": "Lattice-reduction cost model selected for upstream estimation.",
       "type": "string",
       "enum": [
         "BDGL16",
@@ -416,18 +429,21 @@
       ]
     },
     "ReductionModel": {
+      "description": "User-facing pairing of reduction cost and shape assumptions.",
       "type": "string",
       "enum": [
         "coefficient_embedding_v1"
       ]
     },
     "ReductionShapeModel": {
+      "description": "Gram-Schmidt shape assumption selected for upstream estimation.",
       "type": "string",
       "enum": [
         "GSA"
       ]
     },
     "SampleCount": {
+      "description": "Finite or estimator-defined unlimited sample availability.",
       "oneOf": [
         {
           "type": "object",
@@ -464,6 +480,7 @@
       ]
     },
     "SecretDistribution": {
+      "description": "Supported secret-coefficient distributions.",
       "oneOf": [
         {
           "type": "object",
@@ -609,6 +626,7 @@
       ]
     },
     "SecurityModel": {
+      "description": "Security interpretation attached to a parameter case.",
       "type": "string",
       "enum": [
         "classical",
@@ -621,6 +639,7 @@
       "pattern": "^(0|-?[1-9][0-9]*)$"
     },
     "SisNorm": {
+      "description": "Norm used to interpret the SIS solution bound.",
       "type": "string",
       "enum": [
         "l2",

@@ -8,11 +8,15 @@ use crate::{Attack, ErrorDistribution, EstimatorProblem, LweProblem};
 /// Version of the reviewed slow-attack applicability rules.
 pub const SLOW_ATTACK_APPLICABILITY_RULE_VERSION: u32 = 4;
 
+/// Reviewed minimum margin for the quick Arora-GB coarse tier.
 pub const ARORA_GB_COARSE_MARGIN_FLOOR_BITS: u64 = 64;
+/// Reviewed minimum margin for the complete Arora-GB refined tier.
 pub const ARORA_GB_REFINED_MARGIN_FLOOR_BITS: u64 = 10;
+/// Reviewed minimum margin for numeric BKW preflight estimates.
 pub const BKW_PREFLIGHT_MARGIN_FLOOR_BITS: u64 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Whether a slow attack's parameter domain is approved for preflight skipping.
 pub struct SlowAttackApplicability {
     pub code: &'static str,
     pub reason: String,

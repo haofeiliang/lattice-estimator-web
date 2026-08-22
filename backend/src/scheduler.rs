@@ -1,3 +1,8 @@
+//! Concurrent batch scheduler and progressive attack-result publication.
+//!
+//! Plans cache hits, preflight screens, and exact requests; limits concurrency; merges
+//! out-of-order results; and publishes every visible progress transition.
+
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Weak},
@@ -27,6 +32,7 @@ use crate::{
     },
 };
 
+/// Owns the queue receiver and case-level concurrency permits.
 pub struct Scheduler {
     receiver: mpsc::Receiver<String>,
     handle: SchedulerHandle,
@@ -34,12 +40,14 @@ pub struct Scheduler {
 }
 
 #[derive(Clone)]
+/// Cloneable command handle used by application-layer operations.
 pub struct SchedulerHandle {
     sender: mpsc::Sender<String>,
     runner: Arc<Runner>,
     cancellation: Arc<Notify>,
 }
 
+/// Executes claimed jobs and owns result merging, caching, and publication policy.
 struct Runner {
     database: Database,
     upstream: EstimatorClient,
@@ -50,27 +58,32 @@ struct Runner {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkerControl {
+    // Result of racing an estimator request against cancellation and deadline.
     Completed,
     Cancelled,
     TimedOut,
 }
 
 struct PlanOptions {
+    // Exact attacks and absolute deadline assigned to one Sage request plan.
     targets: Vec<Attack>,
     deadline: tokio::time::Instant,
 }
 
 struct PlanExecution {
+    // One completed plan and the attack results it contributed.
     control: WorkerControl,
     results: BTreeMap<Attack, AttackResult>,
 }
 
 struct ProgressSnapshot<'a> {
+    // Borrowed accumulated state used to publish a consistent partial result.
     results: &'a BTreeMap<Attack, AttackResult>,
     preflights: &'a BTreeMap<Attack, PreflightTrace>,
 }
 
 impl Scheduler {
+    /// Construct scheduler workers and the handle used to enqueue work.
     pub fn new(
         database: Database,
         upstream: EstimatorClient,
@@ -101,6 +114,7 @@ impl Scheduler {
         )
     }
 
+    /// Recover queued jobs, then run the case-worker loop in the background.
     pub async fn start(mut self) -> Result<(), ServiceError> {
         for job_id in self.handle.runner.database.queued_jobs().await? {
             self.handle.enqueue(job_id).await?;
@@ -124,6 +138,7 @@ impl Scheduler {
 }
 
 impl SchedulerHandle {
+    /// Persist and enqueue a batch, running synchronously when every result is cached.
     pub async fn submit(
         &self,
         request: EstimateRequest,
@@ -151,6 +166,7 @@ impl SchedulerHandle {
         Ok((false, batch))
     }
 
+    /// Persist cancellation and wake workers that may be waiting on Sage.
     pub async fn cancel(
         &self,
         batch_id: &str,
@@ -165,6 +181,7 @@ impl SchedulerHandle {
             .await
     }
 
+    /// Queue one skipped Arora-GB/BKW exact run inside the original case.
     pub async fn force_exact_attack(
         &self,
         batch_id: &str,
@@ -188,6 +205,7 @@ impl SchedulerHandle {
         Ok(snapshot)
     }
 
+    /// Apply queue backpressure when offering a persisted job to workers.
     async fn enqueue(&self, job_id: String) -> Result<(), ServiceError> {
         self.sender
             .send(job_id)
@@ -195,6 +213,7 @@ impl SchedulerHandle {
             .map_err(|_| ServiceError::Internal("scheduler stopped".to_owned()))
     }
 
+    /// Claim and execute one job, ignoring work another worker already claimed.
     async fn process(&self, job_id: String) -> Result<(), ServiceError> {
         let Some(work) = self.runner.database.claim_job(&job_id).await? else {
             return Ok(());
@@ -243,6 +262,7 @@ impl SchedulerHandle {
 }
 
 impl Runner {
+    /// Determine whether every exact outcome required by a request is cached.
     async fn fully_cached(&self, request: &EstimateRequest) -> Result<bool, ServiceError> {
         for case in &request.cases {
             let context = self.case_context(case)?;
@@ -334,6 +354,7 @@ impl Runner {
         Ok(true)
     }
 
+    /// Execute one claimed job from normalization through terminal persistence.
     async fn process_work(
         self: &Arc<Self>,
         work: &JobWork,
@@ -522,6 +543,7 @@ impl Runner {
         Ok((state, Some(entry)))
     }
 
+    /// Run independent Sage request plans concurrently and merge completions.
     async fn run_plans(
         self: &Arc<Self>,
         work: &JobWork,
@@ -606,6 +628,7 @@ impl Runner {
         Ok(PlanExecution { control, results })
     }
 
+    /// Persist the currently accumulated preflight and attack results.
     async fn publish_progress(
         &self,
         work: &JobWork,
@@ -628,6 +651,7 @@ impl Runner {
         self.database.publish_job_result(&work.job_id, &entry).await
     }
 
+    /// Convert reviewed preflight decisions into explicit skipped outcomes.
     async fn apply_preflight_skips(
         &self,
         work: &JobWork,
@@ -900,6 +924,7 @@ impl Runner {
         Ok(candidates)
     }
 
+    /// Deduplicate identical in-flight cache keys across concurrent cases.
     async fn acquire_flight_locks(
         &self,
         work: &JobWork,
@@ -949,6 +974,7 @@ impl Runner {
         Ok(guards)
     }
 
+    /// Resolve cache hits or issue one exact estimator request plan.
     async fn run_plan(
         &self,
         work: &JobWork,
@@ -1238,6 +1264,7 @@ impl Runner {
         (RunState::TimedOut { finished_at }, Some(entry))
     }
 
+    /// Assemble the report entry used for progressive display and final export.
     fn report_entry(
         &self,
         work: &JobWork,
@@ -1353,6 +1380,7 @@ impl Runner {
         }
     }
 
+    /// Normalize a public case and derive its immutable execution context.
     fn case_context(&self, case: &ParameterCase) -> Result<CaseContext, ServiceError> {
         let analysis_model = analysis_model_for(&case.problem, &case.analysis)?;
         let estimator_problem = match (&case.problem, &analysis_model) {
@@ -1376,6 +1404,7 @@ impl Runner {
         })
     }
 
+    /// Finalize a batch once every case reaches a terminal state.
     async fn refresh_batch(&self, batch_id: &str) -> Result<(), ServiceError> {
         let batch = self.database.batch(batch_id, 1).await?;
         let request = self.database.batch_request(batch_id).await?;
@@ -1441,6 +1470,7 @@ impl Runner {
 }
 
 #[derive(Clone)]
+/// Immutable normalized inputs shared by every attack plan for one case.
 struct CaseContext {
     estimator_problem: EstimatorProblem,
     analysis_model: AnalysisModel,
@@ -1449,6 +1479,7 @@ struct CaseContext {
 }
 
 impl CaseContext {
+    /// Build the complete semantic cache identity for one attack.
     fn cache_identity(&self, attack: Attack) -> AttackCacheIdentity {
         AttackCacheIdentity::new(
             self.estimator_problem.clone(),
@@ -1484,6 +1515,8 @@ fn fast_attack_groups(
     problem: &crate::Problem,
     existing: &BTreeMap<Attack, AttackResult>,
 ) -> Vec<Vec<Attack>> {
+    // Preserve real estimator request families so timing remains attributable to
+    // the shared Sage call while each attack still has its own report outcome.
     let families = match problem {
         crate::Problem::Lwe(_) | crate::Problem::Rlwe(_) | crate::Problem::Glwe(_) => vec![
             vec![
@@ -1514,6 +1547,7 @@ fn fast_attack_groups(
 }
 
 async fn wait_for_cancel(database: &Database, batch_id: &str, job_id: &str, notify: &Notify) {
+    // Cancellation is persisted, so this loop remains correct across process restarts.
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
