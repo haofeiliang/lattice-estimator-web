@@ -79,16 +79,6 @@
         },
         "security_model": {
           "$ref": "#/$defs/SecurityModel"
-        },
-        "shape_model": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ReductionShapeModel"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "additionalProperties": false,
@@ -433,13 +423,6 @@
       "type": "string",
       "enum": [
         "coefficient_embedding_v1"
-      ]
-    },
-    "ReductionShapeModel": {
-      "description": "Gram-Schmidt shape assumption selected for upstream estimation.",
-      "type": "string",
-      "enum": [
-        "GSA"
       ]
     },
     "SampleCount": {

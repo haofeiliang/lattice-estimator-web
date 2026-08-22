@@ -2,10 +2,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import CaseEditor from './CaseEditor.svelte';
-  import { api, ApiError, download, userMessage } from './api';
+  import RunOptions from './RunOptions.svelte';
+  import { api, download, userMessage } from './api';
   import { appendFreshDraft, caseFromDraft, commaList, draftFromCase, freshDraft, freshIdentifier } from './drafts';
+  import { saveParameterSet } from './parameterSets';
+  import { buildEstimateRequest, defaultRunSettings } from './runSettings';
   import type { CaseDraft } from './drafts';
-  import type { EstimateRequest, ParameterSet, ParameterSetSummary } from './types';
+  import type { ParameterSet, ParameterSetSummary } from './types';
 
   let items: ParameterSetSummary[] = [];
   let selected = '';
@@ -15,14 +18,7 @@
   let description = '';
   let tags = '';
   let drafts: CaseDraft[] = [];
-  let mode: 'rough' | 'normal' = 'normal';
-  let timeout = 3600;
-  let requiredBits = '128';
-  let aroraCoarseMarginBits = '64';
-  let aroraRefinedMarginBits = '10';
-  let bkwMarginBits = '10';
-  let forceAroraGb = false;
-  let forceBkw = false;
+  let runSettings = defaultRunSettings();
   let busy = false;
   let message = '';
   let messageIsError = false;
@@ -101,50 +97,15 @@
     };
   }
 
-  function request(): EstimateRequest {
-    const forcedAttacks: Array<'arora_gb' | 'bkw'> = [];
-    if (forceAroraGb) forcedAttacks.push('arora_gb');
-    if (forceBkw) forcedAttacks.push('bkw');
-    return {
-      ...(setName.trim() ? { name: setName.trim() } : {}),
-      ...(selected ? { parameter_set_id: selected } : {}),
-      cases: drafts.map(caseFromDraft),
-      mode,
-      timeout_seconds: timeout,
-      ...(mode === 'normal'
-        ? {
-          slow_attack_policy: {
-            required_security_bits: requiredBits,
-            arora_gb_coarse_margin_bits: aroraCoarseMarginBits,
-            arora_gb_refined_margin_bits: aroraRefinedMarginBits,
-            bkw_margin_bits: bkwMarginBits,
-            ...(forcedAttacks.length ? { forced_attacks: forcedAttacks } : {}),
-          }
-        }
-        : {}),
-    };
-  }
-
   async function save() {
     busy = true;
     clearMessage();
     try {
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          const replace = Boolean(selected) || !generatedSetId;
-          await api(`/v1/parameter-sets/import?conflict=${replace ? 'replace' : 'reject'}`, {
-            method: 'POST',
-            body: JSON.stringify(value()),
-          });
-          break;
-        } catch (error) {
-          if (generatedSetId && error instanceof ApiError && error.status === 409 && attempt < 4) {
-            setId = freshIdentifier('scheme');
-            continue;
-          }
-          throw error;
-        }
-      }
+      const saved = await saveParameterSet(value(), {
+        replace: Boolean(selected) || !generatedSetId,
+        regenerateIdOnConflict: generatedSetId,
+      });
+      setId = saved.id;
       selected = setId;
       generatedSetId = false;
       await refresh();
@@ -162,7 +123,12 @@
     try {
       const result = await api<{ batch_id: string }>('/v1/estimates', {
         method: 'POST',
-        body: JSON.stringify(request()),
+        body: JSON.stringify(buildEstimateRequest({
+          name: setName,
+          ...(selected ? { parameterSetId: selected } : {}),
+          cases: drafts.map(caseFromDraft),
+          settings: runSettings,
+        })),
       });
       showMessage(`已创建批次 ${result.batch_id}`);
     } catch (error) {
@@ -307,30 +273,7 @@
       <button class="add-case" on:click={() => drafts = appendFreshDraft(drafts)}>＋ 添加一组参数</button>
 
       <section class="run-options embedded-options">
-        <div class="option-heading">
-          <div><strong>运行设置</strong><p class="hint">这些设置用于本次运行，不写入方案参数。</p></div>
-          <div class="mode-switch"><button class:active={mode === 'rough'} on:click={() => mode = 'rough'}>快速</button><button class:active={mode === 'normal'} on:click={() => mode = 'normal'}>正常</button></div>
-        </div>
-        <div class="form-grid compact">
-          <label>超时（秒）<input type="number" min="1" max="7200" bind:value={timeout} /></label>
-          {#if mode === 'normal'}<label>目标安全 bit<input bind:value={requiredBits} /></label>{/if}
-        </div>
-        {#if mode === 'normal'}
-          <details class="advanced-run-settings">
-            <summary>高级运行设置</summary>
-            <p class="hint">分别设置各筛选阶段的自定义最低跳过余量；实际值不会低于经校准的安全下限。</p>
-            <div class="form-grid advanced-margin-grid">
-              <label>Arora-GB 粗筛自定义最低跳过余量<input min="0" type="number" bind:value={aroraCoarseMarginBits} /></label>
-              <label>Arora-GB 精筛自定义最低跳过余量<input min="0" type="number" bind:value={aroraRefinedMarginBits} /></label>
-              <label>BKW 自定义最低跳过余量<input min="0" type="number" bind:value={bkwMarginBits} /></label>
-            </div>
-            <div class="force-options">
-              <span><strong>手动运行慢攻击</strong><small>绕过适用域与安全余量判断；可能耗时很久，已有成功结果仍会使用缓存。</small></span>
-              <label class="check-option"><input type="checkbox" bind:checked={forceAroraGb} /> 强制 Arora-GB</label>
-              <label class="check-option"><input type="checkbox" bind:checked={forceBkw} /> 强制 BKW</label>
-            </div>
-          </details>
-        {/if}
+        <RunOptions bind:settings={runSettings} showModeSwitch />
       </section>
 
       <div class="actions editor-actions">

@@ -74,7 +74,6 @@
     if (value.outcome.kind === 'policy_skipped' || value.outcome.kind === 'skipped') return '精确未运行';
     if (value.outcome.kind === 'timeout') return '已超时';
     if (value.outcome.kind === 'failed') return '失败';
-    if (value.outcome.kind === 'unsupported') return '不支持';
     return '无结果';
   }
 </script>

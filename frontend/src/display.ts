@@ -23,7 +23,6 @@ export function outcomeName(result: AttackResult): string {
     case 'no_finite_estimate': return '当前攻击模型未找到有限成本';
     case 'preflight_unknown': return '快速估算未确定，已回退精确估算';
     case 'timeout': return '运行超时';
-    case 'unsupported': return '当前参数不受支持';
     case 'failed': return '估算失败';
     case 'policy_skipped': return result.outcome.code === 'attack_preflight_above_threshold'
       ? '快速估算高于安全阈值，已跳过精确攻击'

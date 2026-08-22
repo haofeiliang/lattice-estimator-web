@@ -881,18 +881,6 @@ impl Runner {
                     );
                     candidates.push(execution.attack);
                 }
-                WorkerOutcome::Unsupported { code, reason } => {
-                    preflights.insert(
-                        execution.attack,
-                        PreflightTrace::Failed {
-                            code,
-                            message: reason,
-                            timing: Some(timing),
-                            decision: PreflightDecision::RunExact,
-                        },
-                    );
-                    candidates.push(execution.attack);
-                }
                 WorkerOutcome::Failed { code, message, .. } => {
                     preflights.insert(
                         execution.attack,
@@ -1149,9 +1137,6 @@ impl Runner {
                     ),
                     retryable: false,
                 },
-                WorkerOutcome::Unsupported { code, reason } => {
-                    AttackOutcome::Unsupported { code, reason }
-                }
                 WorkerOutcome::Failed {
                     code,
                     message,

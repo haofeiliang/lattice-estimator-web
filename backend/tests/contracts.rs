@@ -26,7 +26,6 @@ fn classical(reduction_model: Option<ReductionModel>) -> AnalysisSettings {
     AnalysisSettings {
         security_model: SecurityModel::Classical,
         cost_model: None,
-        shape_model: None,
         reduction_model,
     }
 }
@@ -186,14 +185,14 @@ fn cache_hash_ignores_field_order_and_tracks_estimator_context() {
     let analysis = classical(None).resolve();
     let first = AttackCacheIdentity::new(
         problem_a,
-        AnalysisModel::DirectLwe { version: 1 },
+        AnalysisModel::Direct { version: 1 },
         analysis.clone(),
         Attack::Usvp,
         context.clone(),
     );
     let second = AttackCacheIdentity::new(
         problem_b.clone(),
-        AnalysisModel::DirectLwe { version: 1 },
+        AnalysisModel::Direct { version: 1 },
         analysis.clone(),
         Attack::Usvp,
         context.clone(),
@@ -201,12 +200,12 @@ fn cache_hash_ignores_field_order_and_tracks_estimator_context() {
     assert_eq!(first.hash(), second.hash());
     assert_eq!(
         first.hash(),
-        "sha256:f914d1d00eba06a6980eecc041174888368cedd334d80fe078a43a66057d7162"
+        "sha256:8205c6c271ea17d98b19dece00441a6d4d94bcf5f15c49b4dee8eef9a0d8edef"
     );
 
     let changed = AttackCacheIdentity::new(
         problem_b,
-        AnalysisModel::DirectLwe { version: 1 },
+        AnalysisModel::Direct { version: 1 },
         analysis,
         Attack::Usvp,
         EstimatorContext {

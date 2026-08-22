@@ -1022,7 +1022,6 @@ fn initialize(connection: Connection) -> DbResult<Connection> {
         "PRAGMA journal_mode=WAL;
          PRAGMA foreign_keys=ON;
          PRAGMA synchronous=NORMAL;
-         CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS parameter_sets (
             internal_id TEXT PRIMARY KEY, external_id TEXT NOT NULL, version INTEGER NOT NULL,
             name TEXT NOT NULL, document_json TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -1054,34 +1053,8 @@ fn initialize(connection: Connection) -> DbResult<Connection> {
          CREATE TABLE IF NOT EXISTS job_active_forced_attacks (
             job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
             attack_json TEXT NOT NULL,
-            PRIMARY KEY(job_id,attack_json));
-         INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);",
+            PRIMARY KEY(job_id,attack_json));",
     ).map_err(ServiceError::database)?;
-
-    let has_heartbeat: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('execution_attempts') WHERE name='heartbeat_at')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(ServiceError::database)?;
-    if !has_heartbeat {
-        connection
-            .execute_batch("ALTER TABLE execution_attempts ADD COLUMN heartbeat_at TEXT;")
-            .map_err(ServiceError::database)?;
-    }
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)",
-            [],
-        )
-        .map_err(ServiceError::database)?;
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)",
-            [],
-        )
-        .map_err(ServiceError::database)?;
 
     let timestamp = now();
     let queued = RunState::Queued {

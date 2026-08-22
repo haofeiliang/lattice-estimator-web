@@ -909,14 +909,21 @@ async fn harness(
 
 async fn mock_metadata() -> Json<Value> {
     Json(json!({
-        "adapter_schema_version": 4,
+        "adapter_schema_version": 5,
         "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec", "sage_version": "10.9",
-        "adapter_version": "5", "worker_image": "mock-worker", "platform": "linux/amd64",
+        "adapter_version": "6", "worker_image": "mock-worker", "platform": "linux/amd64",
         "support_matrix": {}, "adaptive_attacks": ["arora_gb", "bkw"]
     }))
 }
 
 async fn mock_estimate(State(state): State<MockState>, Json(request): Json<Value>) -> Json<Value> {
+    assert_eq!(request["schema_version"], 5);
+    assert!(request.get("models").is_none());
+    assert!(request.get("shape_model").is_none());
+    assert!(matches!(
+        request["cost_model"].as_str(),
+        Some("BDGL16" | "LaaMosPol14")
+    ));
     state.calls.fetch_add(1, Ordering::SeqCst);
     let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
     state.max_active.fetch_max(active, Ordering::SeqCst);
@@ -984,9 +991,9 @@ async fn mock_estimate(State(state): State<MockState>, Json(request): Json<Value
         .collect::<Vec<_>>();
     state.active.fetch_sub(1, Ordering::SeqCst);
     Json(json!({
-        "schema_version": 4,
+        "schema_version": 5,
         "results": results, "duration_ms": 1,
-        "provenance": { "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec", "sage_version": "10.9", "adapter_version": "5", "adapter_schema_version": 4, "worker_image": "mock-worker" }
+        "provenance": { "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec", "sage_version": "10.9", "adapter_version": "6", "adapter_schema_version": 5, "worker_image": "mock-worker" }
     }))
 }
 
@@ -994,6 +1001,13 @@ async fn mock_preflight(
     State(state): State<MockState>,
     Json(request): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    assert_eq!(request["schema_version"], 5);
+    assert!(request.get("models").is_none());
+    assert!(request.get("shape_model").is_none());
+    assert!(matches!(
+        request["cost_model"].as_str(),
+        Some("BDGL16" | "LaaMosPol14")
+    ));
     if state
         .preflight_outcomes
         .lock()
@@ -1084,14 +1098,14 @@ async fn mock_preflight(
     (
         StatusCode::OK,
         Json(json!({
-            "schema_version": 4,
+            "schema_version": 5,
             "results": results,
             "duration_ms": 1,
             "provenance": {
                 "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec",
                 "sage_version": "10.9",
-                "adapter_version": "5",
-                "adapter_schema_version": 4,
+                "adapter_version": "6",
+                "adapter_schema_version": 5,
                 "worker_image": "mock-worker"
             }
         })),

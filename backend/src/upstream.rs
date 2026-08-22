@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Attack, DurationScope, EstimatorContext, EstimatorProblem, ExactDecimal, NormalizedMetric,
-    ReductionCostModel, ReductionShapeModel, ResolvedAnalysisSettings, error::ServiceError,
+    ReductionCostModel, ResolvedAnalysisSettings, error::ServiceError,
 };
 
 #[derive(Clone)]
@@ -54,7 +54,7 @@ pub struct WorkerRequest {
     pub operation: Option<&'static str>,
     pub schema_version: u32,
     pub problem: EstimatorProblem,
-    pub models: WorkerModels,
+    pub cost_model: ReductionCostModel,
     pub target_attacks: Vec<Attack>,
     pub timeout_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,12 +75,9 @@ impl WorkerRequest {
     ) -> Self {
         Self {
             operation: None,
-            schema_version: 4,
+            schema_version: 5,
             problem,
-            models: WorkerModels {
-                cost_model: analysis.cost_model,
-                shape_model: analysis.shape_model,
-            },
+            cost_model: analysis.cost_model,
             target_attacks,
             timeout_seconds,
             required_security_bits: None,
@@ -88,13 +85,6 @@ impl WorkerRequest {
             requested_arora_gb_refined_margin_bits: None,
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize)]
-/// Upstream reduction cost and shape selections.
-pub struct WorkerModels {
-    pub cost_model: ReductionCostModel,
-    pub shape_model: ReductionShapeModel,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -156,10 +146,6 @@ pub enum WorkerOutcome {
         reason: String,
         #[serde(default)]
         metrics: std::collections::BTreeMap<String, NormalizedMetric>,
-    },
-    Unsupported {
-        code: String,
-        reason: String,
     },
     Failed {
         code: String,

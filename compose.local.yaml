@@ -1,17 +1,23 @@
-name: lattice-estimator
+name: lattice-estimator-local
 
+# Local source-build stack. Both images are built from the sibling repositories
+# and are independent of the published GHCR images used by compose.yaml.
 services:
   estimator-api:
-    image: ghcr.io/haofeiliang/lattice-estimator-api:latest
-    pull_policy: always
+    image: lattice-estimator-api:local
+    build:
+      context: ../lattice-estimator-api
+      target: runtime
     platform: linux/amd64
     environment:
       LATTICE_ESTIMATOR_API_CONCURRENCY: "${LATTICE_ESTIMATOR_API_CONCURRENCY:-3}"
     restart: unless-stopped
 
   estimator-web:
-    image: ghcr.io/haofeiliang/lattice-estimator-web:latest
-    pull_policy: always
+    image: lattice-estimator-web:local
+    build:
+      context: .
+      target: runtime
     platform: linux/amd64
     depends_on:
       estimator-api:
@@ -22,10 +28,10 @@ services:
       LATTICE_ESTIMATOR_WEB_CASE_CONCURRENCY: "${LATTICE_ESTIMATOR_WEB_CASE_CONCURRENCY:-2}"
       LATTICE_ESTIMATOR_WEB_ESTIMATOR_CONCURRENCY: "${LATTICE_ESTIMATOR_WEB_ESTIMATOR_CONCURRENCY:-3}"
     ports:
-      - "${LATTICE_ESTIMATOR_WEB_HOST:-127.0.0.1}:${LATTICE_ESTIMATOR_WEB_PORT:-8080}:8080"
+      - "${LATTICE_ESTIMATOR_LOCAL_HOST:-127.0.0.1}:${LATTICE_ESTIMATOR_LOCAL_PORT:-8081}:8080"
     volumes:
-      - lattice-estimator-web-data:/var/lib/lattice-estimator-web
+      - lattice-estimator-web-local-data:/var/lib/lattice-estimator-web
     restart: unless-stopped
 
 volumes:
-  lattice-estimator-web-data:
+  lattice-estimator-web-local-data:

@@ -28,11 +28,10 @@
         "sage_version": "10.9",
         "adapter_version": "1",
         "worker_image": "sagemath/sagemath@sha256:2401ffa8e9fc85c7ea17d3649bde5958b4dbf0858b3e504098c4102720151711",
-        "analysis_model": { "kind": "direct_lwe", "version": 1 },
+        "analysis_model": { "kind": "direct", "version": 1 },
         "resolved_analysis": {
           "security_model": "classical",
-          "cost_model": "BDGL16",
-          "shape_model": "GSA"
+          "cost_model": "BDGL16"
         },
         "created_at": "2026-08-17T00:00:00Z"
       },

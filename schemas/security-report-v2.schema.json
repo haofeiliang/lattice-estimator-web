@@ -53,45 +53,7 @@
           "properties": {
             "kind": {
               "type": "string",
-              "const": "direct_lwe"
-            },
-            "version": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "version"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "direct_ntru"
-            },
-            "version": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "version"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "direct_sis"
+              "const": "direct"
             },
             "version": {
               "type": "integer",
@@ -171,16 +133,6 @@
         },
         "security_model": {
           "$ref": "#/$defs/SecurityModel"
-        },
-        "shape_model": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ReductionShapeModel"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "additionalProperties": false,
@@ -270,27 +222,6 @@
           "required": [
             "kind",
             "timeout_seconds"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "code": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "unsupported"
-            },
-            "reason": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "code",
-            "reason"
           ]
         },
         {
@@ -1147,15 +1078,8 @@
         "coefficient_embedding_v1"
       ]
     },
-    "ReductionShapeModel": {
-      "description": "Gram-Schmidt shape assumption selected for upstream estimation.",
-      "type": "string",
-      "enum": [
-        "GSA"
-      ]
-    },
     "ResolvedAnalysisSettings": {
-      "description": "Concrete cost, shape, and classical/quantum settings sent upstream.",
+      "description": "Concrete cost and classical/quantum settings sent upstream.",
       "type": "object",
       "properties": {
         "cost_model": {
@@ -1173,16 +1097,12 @@
         },
         "security_model": {
           "$ref": "#/$defs/SecurityModel"
-        },
-        "shape_model": {
-          "$ref": "#/$defs/ReductionShapeModel"
         }
       },
       "additionalProperties": false,
       "required": [
         "security_model",
-        "cost_model",
-        "shape_model"
+        "cost_model"
       ]
     },
     "SampleCount": {

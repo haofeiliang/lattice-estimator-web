@@ -1,14 +1,12 @@
 //! Lattice estimator domain, application use-cases, and transports.
 //!
-//! `core` is the stable data/rules surface. Runtime modules remain internal so
-//! SQLite jobs and Sage process orchestration do not leak into clients.
+//! Domain types are exported at the crate root. Runtime modules remain internal
+//! so SQLite jobs and Sage process orchestration do not leak into clients.
 
 pub mod api;
 mod applicability;
 pub mod application;
 mod canonical;
-pub mod cli;
-pub mod core;
 mod database;
 mod domain;
 mod error;

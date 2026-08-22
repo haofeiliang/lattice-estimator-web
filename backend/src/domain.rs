@@ -359,13 +359,6 @@ pub enum ReductionCostModel {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-/// Gram-Schmidt shape assumption selected for upstream estimation.
-pub enum ReductionShapeModel {
-    #[serde(rename = "GSA")]
-    Gsa,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 /// User-facing pairing of reduction cost and shape assumptions.
 pub enum ReductionModel {
@@ -431,18 +424,15 @@ pub struct AnalysisSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_model: Option<ReductionCostModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shape_model: Option<ReductionShapeModel>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reduction_model: Option<ReductionModel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Concrete cost, shape, and classical/quantum settings sent upstream.
+/// Concrete cost and classical/quantum settings sent upstream.
 pub struct ResolvedAnalysisSettings {
     pub security_model: SecurityModel,
     pub cost_model: ReductionCostModel,
-    pub shape_model: ReductionShapeModel,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reduction_model: Option<ReductionModel>,
 }
@@ -452,7 +442,6 @@ impl Default for AnalysisSettings {
         Self {
             security_model: SecurityModel::Classical,
             cost_model: None,
-            shape_model: None,
             reduction_model: None,
         }
     }
@@ -465,11 +454,9 @@ impl AnalysisSettings {
             SecurityModel::Classical => ReductionCostModel::Bdgl16,
             SecurityModel::Quantum => ReductionCostModel::LaaMosPol14,
         });
-        let shape_model = self.shape_model.unwrap_or(ReductionShapeModel::Gsa);
         ResolvedAnalysisSettings {
             security_model: self.security_model,
             cost_model,
-            shape_model,
             reduction_model: self.reduction_model,
         }
     }
@@ -619,10 +606,6 @@ pub enum AttackOutcome {
     Timeout {
         timeout_seconds: u64,
     },
-    Unsupported {
-        code: String,
-        reason: String,
-    },
     Failed {
         code: String,
         message: String,
@@ -642,13 +625,7 @@ pub enum AttackOutcome {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 /// Exact transformation used to reduce a public problem to an estimator problem.
 pub enum AnalysisModel {
-    DirectLwe {
-        version: u32,
-    },
-    DirectNtru {
-        version: u32,
-    },
-    DirectSis {
+    Direct {
         version: u32,
     },
     CoefficientEmbeddingV1 {
@@ -666,9 +643,9 @@ pub fn analysis_model_for(
     settings: &AnalysisSettings,
 ) -> Result<AnalysisModel, ValidationError> {
     match problem {
-        Problem::Lwe(_) => Ok(AnalysisModel::DirectLwe { version: 1 }),
-        Problem::Ntru(_) => Ok(AnalysisModel::DirectNtru { version: 1 }),
-        Problem::Sis(_) => Ok(AnalysisModel::DirectSis { version: 1 }),
+        Problem::Lwe(_) | Problem::Ntru(_) | Problem::Sis(_) => {
+            Ok(AnalysisModel::Direct { version: 1 })
+        }
         Problem::Rlwe(problem) => {
             require_coefficient_embedding(settings)?;
             coefficient_embedding(
