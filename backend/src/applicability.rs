@@ -1,5 +1,6 @@
 //! Versioned, deterministic applicability rules for expensive LWE attacks.
 
+use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
 
 use crate::{Attack, ErrorDistribution, EstimatorProblem, LweProblem};
@@ -7,7 +8,8 @@ use crate::{Attack, ErrorDistribution, EstimatorProblem, LweProblem};
 /// Version of the reviewed slow-attack applicability rules.
 pub const SLOW_ATTACK_APPLICABILITY_RULE_VERSION: u32 = 4;
 
-pub const ARORA_GB_PREFLIGHT_MARGIN_FLOOR_BITS: u64 = 10;
+pub const ARORA_GB_COARSE_MARGIN_FLOOR_BITS: u64 = 64;
+pub const ARORA_GB_REFINED_MARGIN_FLOOR_BITS: u64 = 10;
 pub const BKW_PREFLIGHT_MARGIN_FLOOR_BITS: u64 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +44,9 @@ pub fn slow_attack_applicability(
 
 fn arora_gb_applicability(problem: &LweProblem) -> SlowAttackApplicability {
     match &problem.error {
-        ErrorDistribution::DiscreteGaussian { standard_deviation } => {
+        ErrorDistribution::DiscreteGaussian { standard_deviation }
+            if reviewed_arora_gaussian(standard_deviation) =>
+        {
             SlowAttackApplicability::applicable(
                 "arora_gaussian_preflight",
                 format!(
@@ -103,15 +107,29 @@ fn bkw_applicability(problem: &LweProblem) -> SlowAttackApplicability {
 /// Return the per-attack uniform margin floor for a reviewed preflight domain.
 pub fn reviewed_preflight_margin_floor(problem: &LweProblem, attack: Attack) -> Option<u64> {
     match attack {
-        Attack::AroraGb if reviewed_error(&problem.error) => {
-            Some(ARORA_GB_PREFLIGHT_MARGIN_FLOOR_BITS)
+        Attack::AroraGb if reviewed_arora_error(&problem.error) => {
+            Some(ARORA_GB_REFINED_MARGIN_FLOOR_BITS)
         }
-        Attack::Bkw if reviewed_error(&problem.error) => Some(BKW_PREFLIGHT_MARGIN_FLOOR_BITS),
+        Attack::Bkw if reviewed_bkw_error(&problem.error) => Some(BKW_PREFLIGHT_MARGIN_FLOOR_BITS),
         _ => None,
     }
 }
 
-fn reviewed_error(error: &ErrorDistribution) -> bool {
+fn reviewed_arora_error(error: &ErrorDistribution) -> bool {
+    match error {
+        ErrorDistribution::DiscreteGaussian { standard_deviation } => {
+            reviewed_arora_gaussian(standard_deviation)
+        }
+        error => reviewed_bounded_error(error),
+    }
+}
+
+fn reviewed_arora_gaussian(standard_deviation: &crate::ExactDecimal) -> bool {
+    let sigma = standard_deviation.as_big_decimal();
+    sigma >= BigDecimal::from(7) / BigDecimal::from(10) && sigma <= 4
+}
+
+fn reviewed_bkw_error(error: &ErrorDistribution) -> bool {
     matches!(error, ErrorDistribution::DiscreteGaussian { .. }) || reviewed_bounded_error(error)
 }
 

@@ -30,6 +30,12 @@ export function outcomeName(result: AttackResult): string {
   }
 }
 
-export function technicalDetail(result: AttackResult): string {
-  return result.outcome.reason ?? result.outcome.message ?? '';
+export function formatDuration(durationMs?: number): string {
+  if (durationMs === undefined) return '—';
+  if (durationMs < 1) return '<1 ms';
+  if (durationMs < 1000) return `${durationMs} ms`;
+  if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(2)} s`;
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = Math.floor((durationMs % 60_000) / 1000);
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
 }

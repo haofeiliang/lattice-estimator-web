@@ -5,7 +5,7 @@
 //! implementation details behind these operations.
 
 use crate::{
-    EstimateRequest, ParameterSetFile, SecurityReportEntry, SecurityReportFile, Validate,
+    Attack, EstimateRequest, ParameterSetFile, SecurityReportEntry, SecurityReportFile, Validate,
     attacks_for_problem,
     database::Database,
     error::ServiceError,
@@ -47,6 +47,12 @@ pub struct CaseProgress {
     pub state: RunState,
     pub revision: u64,
     pub expected_attack_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<crate::CaseExecutionTiming>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub queued_forced_attacks: Vec<Attack>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub running_forced_attacks: Vec<Attack>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<SecurityReportEntry>,
 }
@@ -125,12 +131,19 @@ impl Application {
                         job.case_id, job.case_index
                     ))
                 })?;
+                let execution = job
+                    .execution
+                    .clone()
+                    .or_else(|| job.result.as_ref().map(|result| result.execution.clone()));
                 Ok(CaseProgress {
                     case_id: job.case_id,
                     case_index: job.case_index,
                     state: job.state,
                     revision: job.revision,
                     expected_attack_count: attacks_for_problem(&parameter.problem).len(),
+                    execution,
+                    queued_forced_attacks: job.queued_forced_attacks,
+                    running_forced_attacks: job.running_forced_attacks,
                     result: job.result,
                 })
             })
@@ -177,6 +190,17 @@ impl Application {
 
     pub async fn rerun(&self, id: &str) -> Result<Submission, ServiceError> {
         self.estimate(self.database.batch_request(id).await?).await
+    }
+
+    pub async fn force_exact_attack(
+        &self,
+        batch_id: &str,
+        case_id: &str,
+        attack: Attack,
+    ) -> Result<BatchSnapshot, ServiceError> {
+        self.scheduler
+            .force_exact_attack(batch_id, case_id, attack, self.poll_after_seconds)
+            .await
     }
 
     pub async fn report(&self, id: &str) -> Result<SecurityReportFile, ServiceError> {

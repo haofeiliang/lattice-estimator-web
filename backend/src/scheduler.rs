@@ -10,16 +10,21 @@ use tokio::{
 };
 
 use crate::{
-    AnalysisModel, Attack, AttackCacheIdentity, AttackOutcome, AttackResult, EstimateMode,
-    EstimateRequest, EstimatorProblem, NormalizedMetric, ParameterCase, Provenance,
-    SLOW_ATTACK_APPLICABILITY_RULE_VERSION, SecurityReportEntry, SecurityReportFile,
-    SecuritySummary, Validate, analysis_model_for, attacks_for_problem, canonical_json,
+    AnalysisModel, Attack, AttackCacheIdentity, AttackOutcome, AttackPreflight, AttackResult,
+    CaseExecutionTiming, EstimateMode, EstimateRequest, EstimatorProblem, ExactDecimal,
+    ExecutionTiming, NormalizedMetric, ParameterCase, PreflightDecision, PreflightPrecisionTier,
+    PreflightTrace, Provenance, SLOW_ATTACK_APPLICABILITY_RULE_VERSION, SecurityReportEntry,
+    SecurityReportFile, SecuritySummary, Validate, analysis_model_for, attacks_for_problem,
+    canonical_json,
     database::{Database, JobWork},
     error::ServiceError,
     fast_attacks_for_problem,
     service::{BatchSnapshot, MAX_QUEUED_JOBS, RunState, now},
     slow_attack_applicability, slow_attacks_for_problem, stable_hash,
-    upstream::{EstimatorClient, Metadata, WorkerOutcome, WorkerRequest},
+    upstream::{
+        EstimatorClient, Metadata, WorkerAttackExecution, WorkerOutcome, WorkerPrecisionTier,
+        WorkerRequest, WorkerThresholdDecision,
+    },
 };
 
 pub struct Scheduler {
@@ -58,6 +63,11 @@ struct PlanOptions {
 struct PlanExecution {
     control: WorkerControl,
     results: BTreeMap<Attack, AttackResult>,
+}
+
+struct ProgressSnapshot<'a> {
+    results: &'a BTreeMap<Attack, AttackResult>,
+    preflights: &'a BTreeMap<Attack, PreflightTrace>,
 }
 
 impl Scheduler {
@@ -155,6 +165,29 @@ impl SchedulerHandle {
             .await
     }
 
+    pub async fn force_exact_attack(
+        &self,
+        batch_id: &str,
+        case_id: &str,
+        attack: Attack,
+        poll_after_seconds: u64,
+    ) -> Result<BatchSnapshot, ServiceError> {
+        if !matches!(attack, Attack::AroraGb | Attack::Bkw) {
+            return Err(ServiceError::BadRequest(
+                "only arora_gb and bkw support forced exact execution".to_owned(),
+            ));
+        }
+        let (job_id, snapshot) = self
+            .runner
+            .database
+            .queue_forced_attack(batch_id, case_id, attack, poll_after_seconds)
+            .await?;
+        if let Some(job_id) = job_id {
+            self.enqueue(job_id).await?;
+        }
+        Ok(snapshot)
+    }
+
     async fn enqueue(&self, job_id: String) -> Result<(), ServiceError> {
         self.sender
             .send(job_id)
@@ -168,10 +201,15 @@ impl SchedulerHandle {
         };
         match self.runner.process_work(&work, &self.cancellation).await {
             Ok((state, report)) => {
-                self.runner
+                let requeued = self
+                    .runner
                     .database
                     .finish_job(&job_id, state, report)
                     .await?;
+                if requeued {
+                    self.enqueue(job_id).await?;
+                    return Ok(());
+                }
             }
             Err(error) if matches!(error, ServiceError::Upstream(_)) && work.attempts < 2 => {
                 self.runner
@@ -188,10 +226,15 @@ impl SchedulerHandle {
                     code: "estimation_failed".to_owned(),
                     message: error.to_string(),
                 };
-                self.runner
+                let requeued = self
+                    .runner
                     .database
                     .finish_job(&job_id, state, None)
                     .await?;
+                if requeued {
+                    self.enqueue(job_id).await?;
+                    return Ok(());
+                }
             }
         }
         self.runner.refresh_batch(&work.batch_id).await?;
@@ -231,12 +274,17 @@ impl Runner {
                 needs_preflight.push(*attack);
             }
             if !needs_preflight.is_empty() {
-                let preflight = WorkerRequest::new(
+                let mut preflight = WorkerRequest::new(
                     context.estimator_problem.clone(),
                     &context.resolved_analysis,
                     needs_preflight,
                     request.timeout_seconds.min(300),
                 );
+                preflight.required_security_bits = Some(policy.required_security_bits.clone());
+                preflight.requested_arora_gb_coarse_margin_bits =
+                    Some(policy.arora_gb_coarse_margin_bits.clone());
+                preflight.requested_arora_gb_refined_margin_bits =
+                    Some(policy.arora_gb_refined_margin_bits.clone());
                 let response = match self.upstream.preflight(&preflight).await {
                     Ok(response) => response,
                     Err(_) => return Ok(false),
@@ -246,8 +294,38 @@ impl Runner {
                         + context
                             .preflight_stop_margin(policy, result.attack)
                             .expect("only calibrated attacks are sent to preflight");
-                    reviewed_preflight_security_bits(&result.outcome)
-                        .is_none_or(|security_bits| security_bits.as_big_decimal() < threshold)
+                    match (&result.attack, &result.outcome) {
+                        (
+                            Attack::AroraGb,
+                            WorkerOutcome::ThresholdScreen {
+                                decision: WorkerThresholdDecision::AboveThreshold,
+                                precision_tier,
+                                required_security_bits,
+                                requested_margin_bits,
+                                calibrated_margin_floor_bits,
+                                effective_margin_bits,
+                                decision_threshold_bits,
+                                metrics,
+                                ..
+                            },
+                        ) => {
+                            !arora_v6_rule_is_reviewed(metrics)
+                                || required_security_bits != &policy.required_security_bits
+                                || requested_margin_bits
+                                    != arora_requested_margin(policy, *precision_tier)
+                                || !arora_v6_policy_fields_are_reviewed(
+                                    *precision_tier,
+                                    required_security_bits,
+                                    requested_margin_bits,
+                                    calibrated_margin_floor_bits,
+                                    effective_margin_bits,
+                                    decision_threshold_bits,
+                                )
+                        }
+                        (Attack::Bkw, outcome) => reviewed_preflight_security_bits(outcome)
+                            .is_none_or(|security_bits| security_bits.as_big_decimal() < threshold),
+                        _ => true,
+                    }
                 }) {
                     return Ok(false);
                 }
@@ -264,36 +342,72 @@ impl Runner {
         let context = self.case_context(&work.case)?;
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(work.request.timeout_seconds);
-        let mut results = BTreeMap::<Attack, AttackResult>::new();
+        let mut results = work
+            .prior_result
+            .iter()
+            .flat_map(|entry| &entry.attacks)
+            .filter(|result| {
+                !work.forced_attack_overrides.contains(&result.attack)
+                    && matches!(
+                        result.outcome,
+                        AttackOutcome::Computed { .. }
+                            | AttackOutcome::NoFiniteEstimate { .. }
+                            | AttackOutcome::PolicySkipped { .. }
+                    )
+            })
+            .map(|result| (result.attack, result.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut preflights = work
+            .prior_result
+            .iter()
+            .flat_map(|entry| &entry.preflights)
+            .map(|preflight| (preflight.attack, preflight.trace.clone()))
+            .collect::<BTreeMap<_, _>>();
         for attack in attacks_for_problem(&work.case.problem) {
             let key = context.cache_identity(*attack).hash();
             if let Some(cached) = self.database.cached_outcome(&key).await? {
-                results.insert(
-                    *attack,
-                    AttackResult {
-                        attack: *attack,
-                        cached: true,
-                        outcome: cached.outcome,
-                    },
-                );
+                results.entry(*attack).or_insert_with(|| AttackResult {
+                    attack: *attack,
+                    cached: true,
+                    timing: cached.timing,
+                    outcome: cached.outcome,
+                });
+                if slow_attacks_for_problem(&work.case.problem).contains(attack) {
+                    preflights
+                        .entry(*attack)
+                        .or_insert_with(|| PreflightTrace::NotRun {
+                            code: "exact_cache_hit".to_owned(),
+                            reason: "命中精确攻击缓存，因此未执行快速估算".to_owned(),
+                        });
+                }
             }
         }
-        self.publish_progress(work, &context, &results, false)
+        self.publish_progress(work, &context, &results, &preflights, false)
             .await?;
 
         let fast_plans = fast_attack_groups(&work.case.problem, &results);
         let mut fast_estimate = false;
         if !fast_plans.is_empty() {
             let execution = self
-                .run_plans(work, &context, fast_plans, deadline, cancellation, &results)
+                .run_plans(
+                    work,
+                    &context,
+                    fast_plans,
+                    deadline,
+                    cancellation,
+                    ProgressSnapshot {
+                        results: &results,
+                        preflights: &preflights,
+                    },
+                )
                 .await?;
             results.extend(execution.results);
             match execution.control {
                 WorkerControl::Cancelled => {
-                    return Ok(self.cancelled_completion(work, &context, results));
+                    return Ok(self.cancelled_completion(work, &context, results, preflights));
                 }
                 WorkerControl::TimedOut => {
-                    return Ok(self.timed_out_completion(work, &context, results));
+                    return Ok(self.timed_out_completion(work, &context, results, preflights));
                 }
                 WorkerControl::Completed => {}
             }
@@ -307,9 +421,17 @@ impl Runner {
 
         let control = if work.request.mode == EstimateMode::Rough {
             for attack in missing_slow {
+                preflights.insert(
+                    attack,
+                    PreflightTrace::NotRun {
+                        code: "rough_mode".to_owned(),
+                        reason: "快速模式不执行慢攻击快速筛选".to_owned(),
+                    },
+                );
                 results.entry(attack).or_insert_with(|| AttackResult {
                     attack,
                     cached: false,
+                    timing: None,
                     outcome: AttackOutcome::Skipped {
                         reason: "rough mode runs fast attacks only".to_owned(),
                     },
@@ -325,23 +447,48 @@ impl Runner {
                 .into_iter()
                 .partition(|attack| policy.forces(*attack));
             let mut slow_candidates = forced;
+            for attack in &slow_candidates {
+                preflights
+                    .entry(*attack)
+                    .or_insert_with(|| PreflightTrace::NotRun {
+                        code: "forced_exact".to_owned(),
+                        reason: "用户要求运行精确攻击，已绕过快速估算".to_owned(),
+                    });
+            }
             slow_candidates.extend(
-                self.apply_preflight_skips(work, &context, automatic, policy, &mut results)
-                    .await?,
+                self.apply_preflight_skips(
+                    work,
+                    &context,
+                    automatic,
+                    policy,
+                    &mut results,
+                    &mut preflights,
+                )
+                .await?,
             );
             if slow_candidates.is_empty() {
-                self.publish_progress(work, &context, &results, false)
+                self.publish_progress(work, &context, &results, &preflights, false)
                     .await?;
                 WorkerControl::Completed
             } else {
-                self.publish_progress(work, &context, &results, false)
+                self.publish_progress(work, &context, &results, &preflights, false)
                     .await?;
                 let plans = slow_candidates
                     .into_iter()
                     .map(|attack| vec![attack])
                     .collect();
                 let execution = self
-                    .run_plans(work, &context, plans, deadline, cancellation, &results)
+                    .run_plans(
+                        work,
+                        &context,
+                        plans,
+                        deadline,
+                        cancellation,
+                        ProgressSnapshot {
+                            results: &results,
+                            preflights: &preflights,
+                        },
+                    )
                     .await?;
                 results.extend(execution.results);
                 execution.control
@@ -350,19 +497,27 @@ impl Runner {
 
         match control {
             WorkerControl::Cancelled => {
-                return Ok(self.cancelled_completion(work, &context, results));
+                return Ok(self.cancelled_completion(work, &context, results, preflights));
             }
             WorkerControl::TimedOut => {
-                return Ok(self.timed_out_completion(work, &context, results));
+                return Ok(self.timed_out_completion(work, &context, results, preflights));
             }
             WorkerControl::Completed => {}
         }
 
-        let entry = self.report_entry(work, &context, results, fast_estimate);
+        let finished_at = now();
+        let entry = self.report_entry(
+            work,
+            &context,
+            results,
+            preflights,
+            fast_estimate,
+            Some(finished_at.clone()),
+        );
         let state = if entry.summary.complete {
-            RunState::Completed { finished_at: now() }
+            RunState::Completed { finished_at }
         } else {
-            RunState::Partial { finished_at: now() }
+            RunState::Partial { finished_at }
         };
         Ok((state, Some(entry)))
     }
@@ -374,7 +529,7 @@ impl Runner {
         plans: Vec<Vec<Attack>>,
         deadline: tokio::time::Instant,
         cancellation: &Arc<Notify>,
-        prior_results: &BTreeMap<Attack, AttackResult>,
+        progress_snapshot: ProgressSnapshot<'_>,
     ) -> Result<PlanExecution, ServiceError> {
         let mut tasks = JoinSet::new();
         for targets in plans {
@@ -428,10 +583,16 @@ impl Runner {
                 }
             };
             results.extend(execution.results);
-            let mut progress = prior_results.clone();
+            let mut progress = progress_snapshot.results.clone();
             progress.extend(results.clone());
-            self.publish_progress(work, context, &progress, false)
-                .await?;
+            self.publish_progress(
+                work,
+                context,
+                &progress,
+                progress_snapshot.preflights,
+                false,
+            )
+            .await?;
             control = match (control, execution.control) {
                 (WorkerControl::Cancelled, _) | (_, WorkerControl::Cancelled) => {
                     WorkerControl::Cancelled
@@ -450,12 +611,20 @@ impl Runner {
         work: &JobWork,
         context: &CaseContext,
         results: &BTreeMap<Attack, AttackResult>,
+        preflights: &BTreeMap<Attack, PreflightTrace>,
         fast_estimate: bool,
     ) -> Result<(), ServiceError> {
-        if results.is_empty() {
+        if results.is_empty() && preflights.is_empty() {
             return Ok(());
         }
-        let entry = self.report_entry(work, context, results.clone(), fast_estimate);
+        let entry = self.report_entry(
+            work,
+            context,
+            results.clone(),
+            preflights.clone(),
+            fast_estimate,
+            None,
+        );
         self.database.publish_job_result(&work.job_id, &entry).await
     }
 
@@ -466,58 +635,266 @@ impl Runner {
         attacks: Vec<Attack>,
         policy: &crate::SlowAttackPolicy,
         results: &mut BTreeMap<Attack, AttackResult>,
+        preflights: &mut BTreeMap<Attack, PreflightTrace>,
     ) -> Result<Vec<Attack>, ServiceError> {
         let (preflight_attacks, mut candidates): (Vec<_>, Vec<_>) = attacks
             .into_iter()
             .partition(|attack| context.preflight_stop_margin(policy, *attack).is_some());
+        for attack in &candidates {
+            let reason = context
+                .applicability(*attack)
+                .map(|value| value.reason)
+                .unwrap_or_else(|_| "参数不在快速估算审核域".to_owned());
+            preflights.insert(
+                *attack,
+                PreflightTrace::NotRun {
+                    code: "unreviewed_domain".to_owned(),
+                    reason,
+                },
+            );
+        }
         if preflight_attacks.is_empty() {
             return Ok(candidates);
         }
-        let request = WorkerRequest::new(
+        let mut request = WorkerRequest::new(
             context.estimator_problem.clone(),
             &context.resolved_analysis,
             preflight_attacks.clone(),
             work.request.timeout_seconds.min(300),
         );
+        request.required_security_bits = Some(policy.required_security_bits.clone());
+        request.requested_arora_gb_coarse_margin_bits =
+            Some(policy.arora_gb_coarse_margin_bits.clone());
+        request.requested_arora_gb_refined_margin_bits =
+            Some(policy.arora_gb_refined_margin_bits.clone());
         let response = match self.upstream.preflight(&request).await {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!(%error, "slow-attack preflight failed; running attacks conservatively");
+                for attack in &preflight_attacks {
+                    preflights.insert(
+                        *attack,
+                        PreflightTrace::Failed {
+                            code: "preflight_request_failed".to_owned(),
+                            message: error.to_string(),
+                            timing: None,
+                            decision: PreflightDecision::RunExact,
+                        },
+                    );
+                }
                 candidates.extend(preflight_attacks);
                 return Ok(candidates);
             }
         };
+        let mut returned = Vec::new();
         for execution in response.results {
+            returned.push(execution.attack);
             let effective_margin = context
                 .preflight_stop_margin(policy, execution.attack)
                 .expect("only calibrated attacks are sent to preflight");
             let threshold = policy.required_security_bits.as_big_decimal() + &effective_margin;
+            let effective_margin_bits = ExactDecimal::new(effective_margin.to_string())
+                .expect("validated margin remains a canonical decimal");
+            let threshold_bits = ExactDecimal::new(threshold.to_string())
+                .expect("validated threshold remains a canonical decimal");
+            let timing = worker_timing(&execution, None);
             match execution.outcome {
-                WorkerOutcome::Computed {
-                    security_bits,
-                    ref metrics,
-                } if preflight_rule_is_reviewed(metrics)
-                    && security_bits.as_big_decimal() >= threshold =>
+                WorkerOutcome::ThresholdScreen {
+                    decision,
+                    precision_tier,
+                    required_security_bits,
+                    requested_margin_bits,
+                    calibrated_margin_floor_bits,
+                    effective_margin_bits,
+                    decision_threshold_bits,
+                    reason,
+                    metrics,
+                } if execution.attack == Attack::AroraGb
+                    && arora_v6_rule_is_reviewed(&metrics)
+                    && required_security_bits == policy.required_security_bits
+                    && &requested_margin_bits == arora_requested_margin(policy, precision_tier)
+                    && arora_v6_policy_fields_are_reviewed(
+                        precision_tier,
+                        &required_security_bits,
+                        &requested_margin_bits,
+                        &calibrated_margin_floor_bits,
+                        &effective_margin_bits,
+                        &decision_threshold_bits,
+                    ) =>
                 {
-                    results.insert(
+                    let skip = decision == WorkerThresholdDecision::AboveThreshold;
+                    preflights.insert(
                         execution.attack,
-                        AttackResult {
-                            attack: execution.attack,
-                            cached: false,
-                            outcome: AttackOutcome::PolicySkipped {
-                                code: "attack_preflight_above_threshold".to_owned(),
-                                reason: format!(
-                                    "{} preflight estimate {} bits is at least the required security plus the effective {}-bit margin",
-                                    slow_attack_label(execution.attack),
-                                    security_bits,
-                                    effective_margin
-                                ),
-                                applicability_rule_version: SLOW_ATTACK_APPLICABILITY_RULE_VERSION,
+                        PreflightTrace::ThresholdScreen {
+                            precision_tier: match precision_tier {
+                                WorkerPrecisionTier::Coarse => PreflightPrecisionTier::Coarse,
+                                WorkerPrecisionTier::Refined => PreflightPrecisionTier::Refined,
+                            },
+                            required_security_bits,
+                            requested_margin_bits,
+                            calibrated_margin_floor_bits,
+                            effective_margin_bits,
+                            threshold_bits: decision_threshold_bits.clone(),
+                            reason: reason.clone(),
+                            timing,
+                            metrics,
+                            decision: if skip {
+                                PreflightDecision::SkipExact
+                            } else {
+                                PreflightDecision::RunExact
                             },
                         },
                     );
+                    if skip {
+                        results.insert(
+                            execution.attack,
+                            AttackResult {
+                                attack: execution.attack,
+                                cached: false,
+                                timing: None,
+                                outcome: AttackOutcome::PolicySkipped {
+                                    code: "attack_preflight_above_threshold".to_owned(),
+                                    reason: format!(
+                                        "Arora-GB v6 target screen confirmed security above {decision_threshold_bits} bits"
+                                    ),
+                                    applicability_rule_version:
+                                        SLOW_ATTACK_APPLICABILITY_RULE_VERSION,
+                                },
+                            },
+                        );
+                    } else {
+                        candidates.push(execution.attack);
+                    }
                 }
-                _ => candidates.push(execution.attack),
+                WorkerOutcome::ThresholdScreen { .. } => {
+                    preflights.insert(
+                        execution.attack,
+                        PreflightTrace::Failed {
+                            code: "unreviewed_threshold_screen".to_owned(),
+                            message:
+                                "Arora-GB 快速筛选目标、余量或规则版本不匹配，保守回退精确计算"
+                                    .to_owned(),
+                            timing: Some(timing),
+                            decision: PreflightDecision::RunExact,
+                        },
+                    );
+                    candidates.push(execution.attack);
+                }
+                WorkerOutcome::Computed {
+                    security_bits,
+                    metrics,
+                } if execution.attack == Attack::Bkw && bkw_v5_rule_is_reviewed(&metrics) => {
+                    let skip = security_bits.as_big_decimal() >= threshold;
+                    preflights.insert(
+                        execution.attack,
+                        PreflightTrace::Computed {
+                            security_bits: security_bits.clone(),
+                            timing,
+                            metrics,
+                            effective_margin_bits,
+                            threshold_bits,
+                            decision: if skip {
+                                PreflightDecision::SkipExact
+                            } else {
+                                PreflightDecision::RunExact
+                            },
+                        },
+                    );
+                    if skip {
+                        results.insert(
+                            execution.attack,
+                            AttackResult {
+                                attack: execution.attack,
+                                cached: false,
+                                timing: None,
+                                outcome: AttackOutcome::PolicySkipped {
+                                    code: "attack_preflight_above_threshold".to_owned(),
+                                    reason: format!(
+                                        "{} preflight estimate {} bits is at least the required security plus the effective {}-bit margin",
+                                        slow_attack_label(execution.attack),
+                                        security_bits,
+                                        effective_margin
+                                    ),
+                                    applicability_rule_version: SLOW_ATTACK_APPLICABILITY_RULE_VERSION,
+                                },
+                            },
+                        );
+                    } else {
+                        candidates.push(execution.attack);
+                    }
+                }
+                WorkerOutcome::Computed { .. } => {
+                    preflights.insert(
+                        execution.attack,
+                        PreflightTrace::Failed {
+                            code: "unreviewed_preflight_rule".to_owned(),
+                            message: "快速估算规则版本未通过审核，保守回退精确计算".to_owned(),
+                            timing: Some(timing),
+                            decision: PreflightDecision::RunExact,
+                        },
+                    );
+                    candidates.push(execution.attack);
+                }
+                WorkerOutcome::PreflightUnknown {
+                    code,
+                    reason,
+                    raw_result,
+                }
+                | WorkerOutcome::NoFiniteEstimate {
+                    code,
+                    reason,
+                    raw_result,
+                } => {
+                    preflights.insert(
+                        execution.attack,
+                        PreflightTrace::Unknown {
+                            code,
+                            reason,
+                            timing,
+                            raw_result,
+                            decision: PreflightDecision::RunExact,
+                        },
+                    );
+                    candidates.push(execution.attack);
+                }
+                WorkerOutcome::Unsupported { code, reason } => {
+                    preflights.insert(
+                        execution.attack,
+                        PreflightTrace::Failed {
+                            code,
+                            message: reason,
+                            timing: Some(timing),
+                            decision: PreflightDecision::RunExact,
+                        },
+                    );
+                    candidates.push(execution.attack);
+                }
+                WorkerOutcome::Failed { code, message, .. } => {
+                    preflights.insert(
+                        execution.attack,
+                        PreflightTrace::Failed {
+                            code,
+                            message,
+                            timing: Some(timing),
+                            decision: PreflightDecision::RunExact,
+                        },
+                    );
+                    candidates.push(execution.attack);
+                }
+            }
+        }
+        for attack in preflight_attacks {
+            if !returned.contains(&attack) {
+                preflights.insert(
+                    attack,
+                    PreflightTrace::Failed {
+                        code: "missing_preflight_result".to_owned(),
+                        message: "快速估算响应缺少该攻击结果，保守回退精确计算".to_owned(),
+                        timing: None,
+                        decision: PreflightDecision::RunExact,
+                    },
+                );
+                candidates.push(attack);
             }
         }
         Ok(candidates)
@@ -613,6 +990,7 @@ impl Runner {
                     AttackResult {
                         attack: *attack,
                         cached: true,
+                        timing: cached.timing,
                         outcome: cached.outcome,
                     },
                 );
@@ -715,13 +1093,13 @@ impl Runner {
             if !targets.contains(&execution.attack) {
                 continue;
             }
+            let timing = Some(worker_timing(&execution, Some(response.duration_ms)));
             let outcome = match execution.outcome {
                 WorkerOutcome::Computed {
                     security_bits,
                     metrics,
                 } => AttackOutcome::Computed {
                     security_bits,
-                    duration_ms: response.duration_ms,
                     metrics,
                 },
                 WorkerOutcome::NoFiniteEstimate {
@@ -733,9 +1111,16 @@ impl Runner {
                     reason,
                     raw_result,
                 },
-                WorkerOutcome::PreflightUnknown { code, reason } => AttackOutcome::Failed {
+                WorkerOutcome::PreflightUnknown { code, reason, .. } => AttackOutcome::Failed {
                     code: format!("unexpected_preflight_outcome:{code}"),
                     message: format!("exact estimator returned a preflight-only outcome: {reason}"),
+                    retryable: false,
+                },
+                WorkerOutcome::ThresholdScreen { reason, .. } => AttackOutcome::Failed {
+                    code: "unexpected_threshold_screen".to_owned(),
+                    message: format!(
+                        "exact estimator returned a preflight-only threshold screen: {reason}"
+                    ),
                     retryable: false,
                 },
                 WorkerOutcome::Unsupported { code, reason } => {
@@ -764,6 +1149,7 @@ impl Runner {
                         identity.hash(),
                         execution.attack,
                         outcome.clone(),
+                        timing.clone(),
                         canonical_json(&self.metadata.context()),
                     )
                     .await?;
@@ -773,6 +1159,7 @@ impl Runner {
                 AttackResult {
                     attack: execution.attack,
                     cached: false,
+                    timing,
                     outcome,
                 },
             );
@@ -781,6 +1168,7 @@ impl Runner {
             results.entry(attack).or_insert_with(|| AttackResult {
                 attack,
                 cached: false,
+                timing: None,
                 outcome: AttackOutcome::Failed {
                     code: "missing_worker_result".to_owned(),
                     message: "worker omitted a target result".to_owned(),
@@ -804,9 +1192,10 @@ impl Runner {
         work: &JobWork,
         context: &CaseContext,
         results: BTreeMap<Attack, AttackResult>,
+        preflights: BTreeMap<Attack, PreflightTrace>,
     ) -> (RunState, Option<SecurityReportEntry>) {
         let timestamp = now();
-        if results.is_empty() {
+        if results.is_empty() && preflights.is_empty() {
             return (
                 RunState::Cancelled {
                     finished_at: timestamp,
@@ -814,7 +1203,14 @@ impl Runner {
                 None,
             );
         }
-        let entry = self.report_entry(work, context, results, false);
+        let entry = self.report_entry(
+            work,
+            context,
+            results,
+            preflights,
+            false,
+            Some(timestamp.clone()),
+        );
         (
             RunState::Partial {
                 finished_at: timestamp,
@@ -828,9 +1224,18 @@ impl Runner {
         work: &JobWork,
         context: &CaseContext,
         results: BTreeMap<Attack, AttackResult>,
+        preflights: BTreeMap<Attack, PreflightTrace>,
     ) -> (RunState, Option<SecurityReportEntry>) {
-        let entry = self.report_entry(work, context, results, false);
-        (RunState::TimedOut { finished_at: now() }, Some(entry))
+        let finished_at = now();
+        let entry = self.report_entry(
+            work,
+            context,
+            results,
+            preflights,
+            false,
+            Some(finished_at.clone()),
+        );
+        (RunState::TimedOut { finished_at }, Some(entry))
     }
 
     fn report_entry(
@@ -838,7 +1243,9 @@ impl Runner {
         work: &JobWork,
         context: &CaseContext,
         results: BTreeMap<Attack, AttackResult>,
+        preflights: BTreeMap<Attack, PreflightTrace>,
         fast_estimate: bool,
+        finished_at: Option<String>,
     ) -> SecurityReportEntry {
         let ordered = attacks_for_problem(&work.case.problem)
             .iter()
@@ -909,6 +1316,10 @@ impl Runner {
         }
         SecurityReportEntry {
             case: work.case.clone(),
+            execution: CaseExecutionTiming {
+                started_at: work.started_at.clone(),
+                finished_at,
+            },
             request_hash,
             provenance: Provenance {
                 estimator_commit: self.metadata.estimator_commit.clone(),
@@ -926,6 +1337,18 @@ impl Runner {
                 fast_estimate,
                 warnings,
             },
+            preflights: slow_attacks_for_problem(&work.case.problem)
+                .iter()
+                .filter_map(|attack| {
+                    preflights
+                        .get(attack)
+                        .cloned()
+                        .map(|trace| AttackPreflight {
+                            attack: *attack,
+                            trace,
+                        })
+                })
+                .collect(),
             attacks: ordered,
         }
     }
@@ -1117,18 +1540,47 @@ fn slow_attack_label(attack: Attack) -> &'static str {
     }
 }
 
+fn worker_timing(
+    execution: &WorkerAttackExecution,
+    request_duration_ms: Option<u64>,
+) -> ExecutionTiming {
+    ExecutionTiming {
+        duration_ms: if execution.duration_scope == crate::DurationScope::RequestGroup {
+            request_duration_ms.unwrap_or(execution.duration_ms)
+        } else {
+            execution.duration_ms
+        },
+        scope: execution.duration_scope,
+        shared_attacks: execution.shared_attacks.clone(),
+    }
+}
+
 fn preflight_stop_margin(
     policy: &crate::SlowAttackPolicy,
     attack: Attack,
     problem: &crate::LweProblem,
 ) -> Option<bigdecimal::BigDecimal> {
     let safety_floor = crate::reviewed_preflight_margin_floor(problem, attack)?;
+    let requested = match attack {
+        Attack::AroraGb => &policy.arora_gb_refined_margin_bits,
+        Attack::Bkw => &policy.bkw_margin_bits,
+        _ => return None,
+    };
     Some(
-        policy
-            .stop_margin_bits
+        requested
             .as_big_decimal()
             .max(bigdecimal::BigDecimal::from(safety_floor)),
     )
+}
+
+fn arora_requested_margin(
+    policy: &crate::SlowAttackPolicy,
+    tier: WorkerPrecisionTier,
+) -> &ExactDecimal {
+    match tier {
+        WorkerPrecisionTier::Coarse => &policy.arora_gb_coarse_margin_bits,
+        WorkerPrecisionTier::Refined => &policy.arora_gb_refined_margin_bits,
+    }
 }
 
 fn reviewed_preflight_security_bits(outcome: &WorkerOutcome) -> Option<&crate::ExactDecimal> {
@@ -1136,12 +1588,40 @@ fn reviewed_preflight_security_bits(outcome: &WorkerOutcome) -> Option<&crate::E
         WorkerOutcome::Computed {
             security_bits,
             metrics,
-        } if preflight_rule_is_reviewed(metrics) => Some(security_bits),
+        } if bkw_v5_rule_is_reviewed(metrics) => Some(security_bits),
         _ => None,
     }
 }
 
-fn preflight_rule_is_reviewed(metrics: &BTreeMap<String, NormalizedMetric>) -> bool {
+fn arora_v6_rule_is_reviewed(metrics: &BTreeMap<String, NormalizedMetric>) -> bool {
+    matches!(
+        metrics.get("preflight_rule_version"),
+        Some(NormalizedMetric::Integer { value }) if value.as_bigint() == 6.into()
+    )
+}
+
+fn arora_v6_policy_fields_are_reviewed(
+    tier: WorkerPrecisionTier,
+    required: &ExactDecimal,
+    requested_margin: &ExactDecimal,
+    calibrated_floor: &ExactDecimal,
+    effective_margin: &ExactDecimal,
+    threshold: &ExactDecimal,
+) -> bool {
+    let expected_floor = match tier {
+        WorkerPrecisionTier::Coarse => crate::ARORA_GB_COARSE_MARGIN_FLOOR_BITS,
+        WorkerPrecisionTier::Refined => crate::ARORA_GB_REFINED_MARGIN_FLOOR_BITS,
+    };
+    let expected_floor = bigdecimal::BigDecimal::from(expected_floor);
+    let expected_effective = requested_margin
+        .as_big_decimal()
+        .max(expected_floor.clone());
+    calibrated_floor.as_big_decimal() == expected_floor
+        && effective_margin.as_big_decimal() == expected_effective
+        && threshold.as_big_decimal() == required.as_big_decimal() + expected_effective
+}
+
+fn bkw_v5_rule_is_reviewed(metrics: &BTreeMap<String, NormalizedMetric>) -> bool {
     matches!(
         metrics.get("preflight_rule_version"),
         Some(NormalizedMetric::Integer { value }) if value.as_bigint() == 5.into()
@@ -1159,6 +1639,7 @@ fn insert_timeouts(
             AttackResult {
                 attack: *attack,
                 cached: false,
+                timing: None,
                 outcome: AttackOutcome::Timeout { timeout_seconds },
             },
         );
@@ -1176,6 +1657,7 @@ fn insert_plan_failures(
             AttackResult {
                 attack: *attack,
                 cached: false,
+                timing: None,
                 outcome: AttackOutcome::Failed {
                     code: "estimator_plan_failed".to_owned(),
                     message: error.to_string(),
@@ -1201,9 +1683,19 @@ mod tests {
     fn slow_attack_preflight_margins_use_only_reviewed_error_domains() {
         let policy = crate::SlowAttackPolicy {
             required_security_bits: crate::ExactDecimal::new("128").unwrap(),
-            stop_margin_bits: crate::ExactDecimal::new("4").unwrap(),
+            arora_gb_coarse_margin_bits: crate::ExactDecimal::new("80").unwrap(),
+            arora_gb_refined_margin_bits: crate::ExactDecimal::new("4").unwrap(),
+            bkw_margin_bits: crate::ExactDecimal::new("24").unwrap(),
             forced_attacks: Vec::new(),
         };
+        assert_eq!(
+            arora_requested_margin(&policy, WorkerPrecisionTier::Coarse),
+            &crate::ExactDecimal::new("80").unwrap()
+        );
+        assert_eq!(
+            arora_requested_margin(&policy, WorkerPrecisionTier::Refined),
+            &crate::ExactDecimal::new("4").unwrap()
+        );
         let problem = |sigma: &str| crate::LweProblem {
             dimension: 1024,
             modulus: crate::PositiveInteger::new("4096").unwrap(),
@@ -1219,11 +1711,15 @@ mod tests {
         );
         assert_eq!(
             preflight_stop_margin(&policy, Attack::AroraGb, &problem("0.6")),
-            Some(bigdecimal::BigDecimal::from(10))
+            None
+        );
+        assert_eq!(
+            preflight_stop_margin(&policy, Attack::AroraGb, &problem("4.1")),
+            None
         );
         assert_eq!(
             preflight_stop_margin(&policy, Attack::Bkw, &problem("1")),
-            Some(bigdecimal::BigDecimal::from(10))
+            Some(bigdecimal::BigDecimal::from(24))
         );
         let mut centered_binomial = problem("1");
         centered_binomial.error = crate::ErrorDistribution::CenteredBinomial { eta: 8 };
@@ -1233,7 +1729,7 @@ mod tests {
         );
         assert_eq!(
             preflight_stop_margin(&policy, Attack::Bkw, &centered_binomial),
-            Some(bigdecimal::BigDecimal::from(10))
+            Some(bigdecimal::BigDecimal::from(24))
         );
         let mut finite_bounded = centered_binomial.clone();
         finite_bounded.samples = crate::SampleCount::Finite { count: 4096 };
@@ -1243,7 +1739,7 @@ mod tests {
         );
         assert_eq!(
             preflight_stop_margin(&policy, Attack::Bkw, &finite_bounded),
-            Some(bigdecimal::BigDecimal::from(10))
+            Some(bigdecimal::BigDecimal::from(24))
         );
         let mut centered_uniform = problem("1");
         centered_uniform.error = crate::ErrorDistribution::UniformInteger {
@@ -1308,8 +1804,38 @@ mod tests {
         let unknown = WorkerOutcome::PreflightUnknown {
             code: "bounded_search_no_finite_candidate".to_owned(),
             reason: "exact estimation is required".to_owned(),
+            raw_result: None,
         };
         assert!(reviewed_preflight_security_bits(&unknown).is_none());
+    }
+
+    #[test]
+    fn arora_v6_requires_the_reviewed_tier_floor_and_threshold_arithmetic() {
+        let decimal = |value: &str| crate::ExactDecimal::new(value).unwrap();
+        assert!(arora_v6_policy_fields_are_reviewed(
+            WorkerPrecisionTier::Coarse,
+            &decimal("128"),
+            &decimal("16"),
+            &decimal("64"),
+            &decimal("64"),
+            &decimal("192"),
+        ));
+        assert!(arora_v6_policy_fields_are_reviewed(
+            WorkerPrecisionTier::Refined,
+            &decimal("128"),
+            &decimal("16"),
+            &decimal("10"),
+            &decimal("16"),
+            &decimal("144"),
+        ));
+        assert!(!arora_v6_policy_fields_are_reviewed(
+            WorkerPrecisionTier::Coarse,
+            &decimal("128"),
+            &decimal("16"),
+            &decimal("32"),
+            &decimal("32"),
+            &decimal("160"),
+        ));
     }
 
     #[test]

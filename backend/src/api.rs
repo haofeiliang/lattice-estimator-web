@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::{
-    EstimateRequest, ParameterSetFile,
+    Attack, EstimateRequest, ParameterSetFile,
     application::BatchDetail,
     error::ServiceError,
     service::{AppState, BatchSnapshot},
@@ -35,6 +35,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/batches/{batch_id}", get(batch).delete(delete_batch))
         .route("/v1/batches/{batch_id}/cancel", post(cancel))
         .route("/v1/batches/{batch_id}/rerun", post(rerun))
+        .route(
+            "/v1/batches/{batch_id}/cases/{case_id}/attacks/{attack}/force-exact",
+            post(force_exact_attack),
+        )
         .route("/v1/batches/{batch_id}/export", get(export_report))
         .route("/v1/parameter-sets", get(parameter_sets))
         .route(
@@ -215,6 +219,26 @@ async fn rerun(
         StatusCode::ACCEPTED
     };
     snapshot_response(status, submission.snapshot)
+}
+
+async fn force_exact_attack(
+    State(state): State<Arc<AppState>>,
+    Path((batch_id, case_id, attack)): Path<(String, String, String)>,
+) -> Result<Response, ServiceError> {
+    let attack = match attack.as_str() {
+        "arora_gb" => Attack::AroraGb,
+        "bkw" => Attack::Bkw,
+        _ => {
+            return Err(ServiceError::BadRequest(
+                "attack must be arora_gb or bkw".to_owned(),
+            ));
+        }
+    };
+    let snapshot = state
+        .application
+        .force_exact_attack(&batch_id, &case_id, attack)
+        .await?;
+    snapshot_response(StatusCode::ACCEPTED, snapshot)
 }
 
 async fn export_report(

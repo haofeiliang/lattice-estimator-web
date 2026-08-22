@@ -3,8 +3,8 @@ use std::{path::PathBuf, sync::Arc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    SecurityReportEntry, SecurityReportFile, application::Application, database::Database,
-    error::ServiceError, scheduler::Scheduler, upstream::EstimatorClient,
+    CaseExecutionTiming, SecurityReportEntry, SecurityReportFile, application::Application,
+    database::Database, error::ServiceError, scheduler::Scheduler, upstream::EstimatorClient,
 };
 
 pub const MAX_QUEUED_JOBS: usize = 2_000;
@@ -158,7 +158,10 @@ pub(crate) struct JobSnapshot {
     pub attempts: u32,
     pub created_at: String,
     pub updated_at: String,
+    pub execution: Option<CaseExecutionTiming>,
     pub result: Option<SecurityReportEntry>,
+    pub queued_forced_attacks: Vec<crate::Attack>,
+    pub running_forced_attacks: Vec<crate::Attack>,
 }
 
 #[derive(Clone)]

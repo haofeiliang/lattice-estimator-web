@@ -3,11 +3,12 @@
 
   export let draft: CaseDraft;
   export let index: number;
+  export let focused = false;
   export let removable = false;
   export let onRemove: () => void = () => {};
 </script>
 
-<section class="panel case-card">
+<section class:edit-focus={focused} class="panel case-card" data-estimate-case-id={draft.id} tabindex="-1">
   <header>
     <strong>#{index + 1} {draft.name || '未命名参数'}</strong>
     {#if removable}<button class="danger ghost" on:click={onRemove}>删除</button>{/if}

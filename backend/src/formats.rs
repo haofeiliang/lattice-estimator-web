@@ -4,8 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AnalysisModel, AnalysisSettings, Attack, AttackOutcome, ExactDecimal, Problem,
-    ResolvedAnalysisSettings,
+    AnalysisModel, AnalysisSettings, Attack, AttackOutcome, CaseExecutionTiming, ExactDecimal,
+    ExecutionTiming, PreflightTrace, Problem, ResolvedAnalysisSettings,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -63,7 +63,16 @@ pub struct AttackResult {
     pub attack: Attack,
     #[serde(default)]
     pub cached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<ExecutionTiming>,
     pub outcome: AttackOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AttackPreflight {
+    pub attack: Attack,
+    pub trace: PreflightTrace,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -82,9 +91,11 @@ pub struct Provenance {
 #[serde(deny_unknown_fields)]
 pub struct SecurityReportEntry {
     pub case: ParameterCase,
+    pub execution: CaseExecutionTiming,
     pub request_hash: String,
     pub provenance: Provenance,
     pub summary: SecuritySummary,
+    pub preflights: Vec<AttackPreflight>,
     #[serde(default)]
     pub attacks: Vec<AttackResult>,
 }
@@ -134,7 +145,9 @@ pub enum EstimateMode {
 #[serde(deny_unknown_fields)]
 pub struct SlowAttackPolicy {
     pub required_security_bits: ExactDecimal,
-    pub stop_margin_bits: ExactDecimal,
+    pub arora_gb_coarse_margin_bits: ExactDecimal,
+    pub arora_gb_refined_margin_bits: ExactDecimal,
+    pub bkw_margin_bits: ExactDecimal,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forced_attacks: Vec<Attack>,
 }

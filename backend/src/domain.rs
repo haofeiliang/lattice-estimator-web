@@ -470,12 +470,95 @@ pub enum NormalizedMetric {
     Text { value: String },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DurationScope {
+    Attack,
+    RequestGroup,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionTiming {
+    pub duration_ms: u64,
+    pub scope: DurationScope,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_attacks: Vec<Attack>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightDecision {
+    RunExact,
+    SkipExact,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightPrecisionTier {
+    Coarse,
+    Refined,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PreflightTrace {
+    ThresholdScreen {
+        precision_tier: PreflightPrecisionTier,
+        required_security_bits: ExactDecimal,
+        requested_margin_bits: ExactDecimal,
+        calibrated_margin_floor_bits: ExactDecimal,
+        effective_margin_bits: ExactDecimal,
+        threshold_bits: ExactDecimal,
+        reason: String,
+        timing: ExecutionTiming,
+        #[serde(default)]
+        metrics: BTreeMap<String, NormalizedMetric>,
+        decision: PreflightDecision,
+    },
+    Computed {
+        security_bits: ExactDecimal,
+        timing: ExecutionTiming,
+        #[serde(default)]
+        metrics: BTreeMap<String, NormalizedMetric>,
+        effective_margin_bits: ExactDecimal,
+        threshold_bits: ExactDecimal,
+        decision: PreflightDecision,
+    },
+    Unknown {
+        code: String,
+        reason: String,
+        timing: ExecutionTiming,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_result: Option<serde_json::Value>,
+        decision: PreflightDecision,
+    },
+    Failed {
+        code: String,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timing: Option<ExecutionTiming>,
+        decision: PreflightDecision,
+    },
+    NotRun {
+        code: String,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CaseExecutionTiming {
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AttackOutcome {
     Computed {
         security_bits: ExactDecimal,
-        duration_ms: u64,
         #[serde(default)]
         metrics: BTreeMap<String, NormalizedMetric>,
     },

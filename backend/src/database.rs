@@ -10,8 +10,8 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::{
-    AttackOutcome, EstimateRequest, ParameterCase, ParameterSetFile, SecurityReportEntry,
-    SecurityReportFile,
+    Attack, AttackOutcome, CaseExecutionTiming, EstimateRequest, ExecutionTiming, ParameterCase,
+    ParameterSetFile, SecurityReportEntry, SecurityReportFile,
     application::{ImportedParameterSet, ParameterSetSummary},
     error::ServiceError,
     service::{BatchSnapshot, JobSnapshot, MAX_QUEUED_JOBS, RunState, now},
@@ -32,11 +32,15 @@ pub struct JobWork {
     pub case: ParameterCase,
     pub request: EstimateRequest,
     pub attempts: u32,
+    pub started_at: String,
+    pub forced_attack_overrides: Vec<Attack>,
+    pub prior_result: Option<SecurityReportEntry>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CachedOutcome {
     pub outcome: AttackOutcome,
+    pub timing: Option<ExecutionTiming>,
 }
 
 #[derive(Clone, Debug)]
@@ -261,7 +265,7 @@ impl Database {
             let transaction = connection.transaction().map_err(ServiceError::database)?;
             let row = transaction
                 .query_row(
-                    "SELECT batch_id,case_index,state_kind,attempts FROM jobs WHERE id=?1",
+                    "SELECT batch_id,case_index,state_kind,attempts,result_json FROM jobs WHERE id=?1",
                     [&job_id],
                     |row| {
                         Ok((
@@ -269,12 +273,13 @@ impl Database {
                             row.get::<_, i64>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, i64>(3)?,
+                            row.get::<_, Option<String>>(4)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(ServiceError::database)?;
-            let Some((batch_id, case_index, state_kind, attempts)) = row else {
+            let Some((batch_id, case_index, state_kind, attempts, result_json)) = row else {
                 return Ok(None);
             };
             if state_kind != "queued" {
@@ -287,7 +292,45 @@ impl Database {
                     |row| row.get(0),
                 )
                 .map_err(ServiceError::database)?;
-            let request: EstimateRequest = from_json(&request_json)?;
+            let mut request: EstimateRequest = from_json(&request_json)?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO job_active_forced_attacks (job_id,attack_json) SELECT job_id,attack_json FROM job_forced_attacks WHERE job_id=?1",
+                    [&job_id],
+                )
+                .map_err(ServiceError::database)?;
+            transaction
+                .execute("DELETE FROM job_forced_attacks WHERE job_id=?1", [&job_id])
+                .map_err(ServiceError::database)?;
+            let forced_attacks = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT attack_json FROM job_active_forced_attacks WHERE job_id=?1 ORDER BY attack_json",
+                    )
+                    .map_err(ServiceError::database)?;
+                statement
+                    .query_map([&job_id], |row| row.get::<_, String>(0))
+                    .map_err(ServiceError::database)?
+                    .map(|value| value.map_err(ServiceError::database).and_then(|value| from_json(&value)))
+                    .collect::<DbResult<Vec<Attack>>>()?
+            };
+            let prior_result = if forced_attacks.is_empty() {
+                None
+            } else {
+                result_json.as_deref().map(from_json).transpose()?
+            };
+            if !forced_attacks.is_empty() {
+                let policy = request.slow_attack_policy.as_mut().ok_or_else(|| {
+                    ServiceError::Database(
+                        "stored forced slow attack requires a slow-attack policy".to_owned(),
+                    )
+                })?;
+                for attack in &forced_attacks {
+                    if !policy.forced_attacks.contains(attack) {
+                        policy.forced_attacks.push(*attack);
+                    }
+                }
+            }
             let index = usize::try_from(case_index).map_err(ServiceError::database)?;
             let case = request
                 .cases
@@ -324,6 +367,9 @@ impl Database {
                 case,
                 request,
                 attempts: u32::try_from(attempts + 1).map_err(ServiceError::database)?,
+                started_at: timestamp,
+                forced_attack_overrides: forced_attacks,
+                prior_result,
             }))
         })
         .await
@@ -334,7 +380,7 @@ impl Database {
         job_id: &str,
         state: RunState,
         result: Option<SecurityReportEntry>,
-    ) -> DbResult<()> {
+    ) -> DbResult<bool> {
         let job_id = job_id.to_owned();
         self.call(move |connection| {
             let transaction = connection.transaction().map_err(ServiceError::database)?;
@@ -364,8 +410,32 @@ impl Database {
                     params![batch_id, timestamp],
                 )
                 .map_err(ServiceError::database)?;
+            transaction
+                .execute("DELETE FROM job_active_forced_attacks WHERE job_id=?1", [&job_id])
+                .map_err(ServiceError::database)?;
+            let has_pending: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM job_forced_attacks WHERE job_id=?1)",
+                    [&job_id],
+                    |row| row.get(0),
+                )
+                .map_err(ServiceError::database)?;
+            if has_pending {
+                let queued = RunState::Queued {
+                    queued_at: timestamp.clone(),
+                };
+                transaction
+                    .execute(
+                        "UPDATE jobs SET state_kind='queued',state_json=?2,attempts=0,revision=revision+1,updated_at=?3 WHERE id=?1",
+                        params![job_id, json(&queued)?, timestamp],
+                    )
+                    .map_err(ServiceError::database)?;
+                transaction
+                    .execute("DELETE FROM execution_attempts WHERE job_id=?1", [&job_id])
+                    .map_err(ServiceError::database)?;
+            }
             transaction.commit().map_err(ServiceError::database)?;
-            Ok(())
+            Ok(has_pending)
         })
         .await
     }
@@ -427,7 +497,7 @@ impl Database {
                 .map_err(ServiceError::database)?;
             transaction
                 .execute(
-                    "UPDATE jobs SET state_kind='queued',state_json=?2,result_json=NULL,revision=revision+1,updated_at=?3 WHERE id=?1",
+                    "UPDATE jobs SET state_kind='queued',state_json=?2,result_json=CASE WHEN EXISTS (SELECT 1 FROM job_active_forced_attacks WHERE job_id=?1) THEN result_json ELSE NULL END,revision=revision+1,updated_at=?3 WHERE id=?1",
                     params![job_id, json(&state)?, timestamp],
                 )
                 .map_err(ServiceError::database)?;
@@ -541,6 +611,141 @@ impl Database {
         .await
     }
 
+    pub async fn queue_forced_attack(
+        &self,
+        batch_id: &str,
+        case_id: &str,
+        attack: Attack,
+        poll_after_seconds: u64,
+    ) -> DbResult<(Option<String>, BatchSnapshot)> {
+        let batch_id = batch_id.to_owned();
+        let case_id = case_id.to_owned();
+        self.call(move |connection| {
+            let transaction = connection.transaction().map_err(ServiceError::database)?;
+            let batch_state = transaction
+                .query_row(
+                    "SELECT state_kind FROM batches WHERE id=?1",
+                    [&batch_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(ServiceError::database)?
+                .ok_or_else(|| ServiceError::NotFound("batch not found".to_owned()))?;
+            if batch_state == "cancel_requested" {
+                return Err(ServiceError::Conflict(
+                    "batch cancellation is already in progress".to_owned(),
+                ));
+            }
+            let (job_id, job_state, result_json) = transaction
+                .query_row(
+                    "SELECT id,state_kind,result_json FROM jobs WHERE batch_id=?1 AND case_id=?2",
+                    params![batch_id, case_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(ServiceError::database)?
+                .ok_or_else(|| ServiceError::NotFound("case not found in batch".to_owned()))?;
+            if job_state == "cancel_requested" {
+                return Err(ServiceError::Conflict(
+                    "case cancellation is already in progress".to_owned(),
+                ));
+            }
+            let result: SecurityReportEntry = result_json
+                .as_deref()
+                .map(from_json)
+                .transpose()?
+                .ok_or_else(|| ServiceError::Conflict("case has no attack result".to_owned()))?;
+            let was_policy_skipped = result.attacks.iter().any(|item| {
+                item.attack == attack
+                    && matches!(item.outcome, AttackOutcome::PolicySkipped { .. })
+            });
+            if !was_policy_skipped {
+                return Err(ServiceError::Conflict(
+                    "exact attack was not skipped by policy".to_owned(),
+                ));
+            }
+            let duplicate: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM job_forced_attacks WHERE job_id=?1 AND attack_json=?2 UNION SELECT 1 FROM job_active_forced_attacks WHERE job_id=?1 AND attack_json=?2)",
+                    params![job_id, json(&attack)?],
+                    |row| row.get(0),
+                )
+                .map_err(ServiceError::database)?;
+            if duplicate {
+                return Err(ServiceError::Conflict(
+                    "exact attack is already queued or running".to_owned(),
+                ));
+            }
+
+            let terminal_job = matches!(
+                job_state.as_str(),
+                "completed" | "partial" | "timed_out" | "cancelled" | "failed"
+            );
+            if terminal_job {
+                let active: i64 = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM jobs WHERE state_kind IN ('queued','running','cancel_requested')",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(ServiceError::database)?;
+                if usize::try_from(active).unwrap_or(usize::MAX) >= MAX_QUEUED_JOBS {
+                    return Err(ServiceError::QueueFull);
+                }
+            }
+
+            let timestamp = now();
+            let queued = RunState::Queued {
+                queued_at: timestamp.clone(),
+            };
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO job_forced_attacks (job_id,attack_json) VALUES (?1,?2)",
+                    params![job_id, json(&attack)?],
+                )
+                .map_err(ServiceError::database)?;
+            if terminal_job {
+                transaction
+                    .execute("DELETE FROM execution_attempts WHERE job_id=?1", [&job_id])
+                    .map_err(ServiceError::database)?;
+                transaction
+                    .execute(
+                        "UPDATE jobs SET state_kind='queued',state_json=?2,revision=revision+1,attempts=0,updated_at=?3 WHERE id=?1",
+                        params![job_id, json(&queued)?, timestamp],
+                    )
+                    .map_err(ServiceError::database)?;
+            }
+            if matches!(
+                batch_state.as_str(),
+                "completed" | "partial" | "timed_out" | "cancelled" | "failed"
+            ) {
+                transaction
+                    .execute(
+                        "UPDATE batches SET state_kind='queued',state_json=?2,report_json=NULL,revision=revision+1,updated_at=?3 WHERE id=?1",
+                        params![batch_id, json(&queued)?, timestamp],
+                    )
+                    .map_err(ServiceError::database)?;
+            } else {
+                transaction
+                    .execute(
+                        "UPDATE batches SET report_json=NULL,revision=revision+1,updated_at=?2 WHERE id=?1",
+                        params![batch_id, timestamp],
+                    )
+                    .map_err(ServiceError::database)?;
+            }
+            transaction.commit().map_err(ServiceError::database)?;
+            let snapshot = load_batch(connection, &batch_id, poll_after_seconds)?;
+            Ok((terminal_job.then_some(job_id), snapshot))
+        })
+        .await
+    }
+
     pub async fn delete_batches(&self, batch_ids: Vec<String>) -> DbResult<()> {
         self.call(move |connection| {
             let transaction = connection.transaction().map_err(ServiceError::database)?;
@@ -610,6 +815,14 @@ impl Database {
                     "UPDATE jobs SET state_kind='cancel_requested',state_json=?2,revision=revision+1,updated_at=?3 WHERE batch_id=?1 AND state_kind='running'",
                     params![batch_id, json(&requested)?, timestamp],
                 ).map_err(ServiceError::database)?;
+                transaction.execute(
+                    "DELETE FROM job_forced_attacks WHERE job_id IN (SELECT id FROM jobs WHERE batch_id=?1)",
+                    [&batch_id],
+                ).map_err(ServiceError::database)?;
+                transaction.execute(
+                    "DELETE FROM job_active_forced_attacks WHERE job_id IN (SELECT id FROM jobs WHERE batch_id=?1)",
+                    [&batch_id],
+                ).map_err(ServiceError::database)?;
             }
             transaction.commit().map_err(ServiceError::database)?;
             load_batch(connection, &batch_id, 1)
@@ -642,9 +855,7 @@ impl Database {
                 )
                 .optional()
                 .map_err(ServiceError::database)?;
-            value
-                .map(|value| from_json(&value).map(|outcome| CachedOutcome { outcome }))
-                .transpose()
+            value.map(|value| from_json(&value)).transpose()
         })
         .await
     }
@@ -654,12 +865,13 @@ impl Database {
         key: String,
         attack: crate::Attack,
         outcome: AttackOutcome,
+        timing: Option<ExecutionTiming>,
         context_json: String,
     ) -> DbResult<()> {
         self.call(move |connection| {
             connection.execute(
                 "INSERT OR IGNORE INTO attack_cache (cache_key,attack,outcome_json,estimator_context_json,created_at) VALUES (?1,?2,?3,?4,?5)",
-                params![key, json(&attack)?, json(&outcome)?, context_json, now()],
+                params![key, json(&attack)?, json(&CachedOutcome { outcome, timing })?, context_json, now()],
             ).map_err(ServiceError::database)?;
             Ok(())
         }).await
@@ -808,6 +1020,14 @@ fn initialize(connection: Connection) -> DbResult<Connection> {
             id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), attempt INTEGER NOT NULL,
             state_kind TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT,
             finished_at TEXT, error_json TEXT);
+         CREATE TABLE IF NOT EXISTS job_forced_attacks (
+            job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            attack_json TEXT NOT NULL,
+            PRIMARY KEY(job_id,attack_json));
+         CREATE TABLE IF NOT EXISTS job_active_forced_attacks (
+            job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            attack_json TEXT NOT NULL,
+            PRIMARY KEY(job_id,attack_json));
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);",
     ).map_err(ServiceError::database)?;
 
@@ -859,7 +1079,7 @@ fn initialize(connection: Connection) -> DbResult<Connection> {
         params![json(&cancelled)?, timestamp],
     ).map_err(ServiceError::database)?;
     connection.execute(
-        "UPDATE jobs SET state_kind='queued',state_json=?1,result_json=NULL,revision=revision+1,updated_at=?2 WHERE state_kind='running' AND attempts < 2",
+        "UPDATE jobs SET state_kind='queued',state_json=?1,result_json=CASE WHEN EXISTS (SELECT 1 FROM job_active_forced_attacks WHERE job_id=jobs.id) THEN result_json ELSE NULL END,revision=revision+1,updated_at=?2 WHERE state_kind='running' AND attempts < 2",
         params![json(&queued)?, timestamp],
     ).map_err(ServiceError::database)?;
     connection.execute(
@@ -921,23 +1141,57 @@ fn load_batch(
 
 fn load_job(connection: &Connection, job_id: &str) -> DbResult<JobSnapshot> {
     let row = connection.query_row(
-        "SELECT batch_id,case_id,case_index,state_json,revision,attempts,created_at,updated_at,result_json FROM jobs WHERE id=?1",
+        "SELECT batch_id,case_id,case_index,state_json,revision,attempts,created_at,updated_at,result_json,
+                (SELECT MIN(started_at) FROM execution_attempts WHERE job_id=jobs.id),
+                (SELECT MAX(finished_at) FROM execution_attempts WHERE job_id=jobs.id)
+         FROM jobs WHERE id=?1",
         [job_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?)),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?)),
     ).optional().map_err(ServiceError::database)?
         .ok_or_else(|| ServiceError::NotFound("job not found".to_owned()))?;
+    let state: RunState = from_json(&row.3)?;
+    let execution = row.9.map(|started_at| CaseExecutionTiming {
+        started_at,
+        finished_at: state.terminal().then_some(row.10).flatten(),
+    });
+    let queued_forced_attacks = load_job_attacks(
+        connection,
+        "SELECT attack_json FROM job_forced_attacks WHERE job_id=?1 ORDER BY attack_json",
+        job_id,
+    )?;
+    let running_forced_attacks = load_job_attacks(
+        connection,
+        "SELECT attack_json FROM job_active_forced_attacks WHERE job_id=?1 ORDER BY attack_json",
+        job_id,
+    )?;
     Ok(JobSnapshot {
         job_id: job_id.to_owned(),
         batch_id: row.0,
         case_id: row.1,
         case_index: usize::try_from(row.2).map_err(ServiceError::database)?,
-        state: from_json(&row.3)?,
+        state,
         revision: u64::try_from(row.4).map_err(ServiceError::database)?,
         attempts: u32::try_from(row.5).map_err(ServiceError::database)?,
         created_at: row.6,
         updated_at: row.7,
+        execution,
         result: row.8.map(|value| from_json(&value)).transpose()?,
+        queued_forced_attacks,
+        running_forced_attacks,
     })
+}
+
+fn load_job_attacks(connection: &Connection, query: &str, job_id: &str) -> DbResult<Vec<Attack>> {
+    let mut statement = connection.prepare(query).map_err(ServiceError::database)?;
+    statement
+        .query_map([job_id], |row| row.get::<_, String>(0))
+        .map_err(ServiceError::database)?
+        .map(|value| {
+            value
+                .map_err(ServiceError::database)
+                .and_then(|value| from_json(&value))
+        })
+        .collect()
 }
 
 fn json<T: serde::Serialize>(value: &T) -> DbResult<String> {

@@ -31,6 +31,7 @@ struct MockState {
     plan_delays: Arc<Mutex<HashMap<String, Duration>>>,
     dimension_delays: Arc<Mutex<HashMap<u64, Duration>>>,
     retryable_failures: Arc<Mutex<HashMap<String, usize>>>,
+    preflight_outcomes: Arc<Mutex<HashMap<String, String>>>,
     delay: Duration,
     security_bits: &'static str,
 }
@@ -43,6 +44,7 @@ struct Harness {
     plan_delays: Arc<Mutex<HashMap<String, Duration>>>,
     dimension_delays: Arc<Mutex<HashMap<u64, Duration>>>,
     retryable_failures: Arc<Mutex<HashMap<String, usize>>>,
+    preflight_outcomes: Arc<Mutex<HashMap<String, String>>>,
     _directory: TempDir,
     worker: tokio::task::JoinHandle<()>,
 }
@@ -78,6 +80,17 @@ async fn reviewed_bounded_preflight_can_skip_both_slow_attacks() {
             .count(),
         2
     );
+    let preflights = completed["report"]["reports"][0]["preflights"]
+        .as_array()
+        .unwrap();
+    assert_eq!(preflights.len(), 2);
+    assert!(preflights.iter().all(|item| {
+        matches!(
+            item["trace"]["kind"].as_str(),
+            Some("threshold_screen" | "computed")
+        ) && item["trace"]["decision"] == "skip_exact"
+            && item["trace"]["timing"]["scope"] == "attack"
+    }));
     assert!(
         !harness
             .plans
@@ -89,6 +102,178 @@ async fn reviewed_bounded_preflight_can_skip_both_slow_attacks() {
     let second = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
     assert_eq!(second.0, StatusCode::OK);
     assert_eq!(harness.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn policy_skipped_attack_can_run_exactly_in_the_original_batch() {
+    let harness = harness("196", Duration::from_millis(10), None).await;
+    let request = estimate_request("128");
+    let submitted = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
+    let batch_id = submitted.1["batch_id"].as_str().unwrap().to_owned();
+    let initial = wait_for_terminal(&harness.app, &batch_id).await;
+    let case_id = initial["cases"][0]["case_id"].as_str().unwrap().to_owned();
+    let initial_revision = initial["revision"].as_u64().unwrap();
+    let initial_preflights = initial["report"]["reports"][0]["preflights"].clone();
+    harness
+        .plan_delays
+        .lock()
+        .unwrap()
+        .insert("arora_gb".to_owned(), Duration::from_millis(250));
+
+    let forced = json_request(
+        &harness.app,
+        "POST",
+        &format!("/v1/batches/{batch_id}/cases/{case_id}/attacks/arora_gb/force-exact"),
+        &Value::Null,
+        None,
+    )
+    .await;
+    assert_eq!(forced.0, StatusCode::ACCEPTED);
+    assert_eq!(forced.1["batch_id"], batch_id);
+    assert_eq!(forced.1["state"]["kind"], "queued");
+    assert!(forced.1["report"].is_null());
+    assert!(forced.1["revision"].as_u64().unwrap() > initial_revision);
+
+    let running = wait_for_detail(&harness.app, &batch_id, |detail| {
+        detail["cases"][0]["running_forced_attacks"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item == "arora_gb"))
+    })
+    .await;
+    assert_eq!(running["cases"][0]["state"]["kind"], "running");
+
+    let forced_bkw = json_request(
+        &harness.app,
+        "POST",
+        &format!("/v1/batches/{batch_id}/cases/{case_id}/attacks/bkw/force-exact"),
+        &Value::Null,
+        None,
+    )
+    .await;
+    assert_eq!(forced_bkw.0, StatusCode::ACCEPTED);
+    let queued = wait_for_detail(&harness.app, &batch_id, |detail| {
+        detail["cases"][0]["queued_forced_attacks"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item == "bkw"))
+    })
+    .await;
+    assert_eq!(queued["cases"][0]["state"]["kind"], "running");
+    let both_completed = wait_for_terminal(&harness.app, &batch_id).await;
+    let final_entry = &both_completed["report"]["reports"][0];
+    assert_eq!(final_entry["preflights"], initial_preflights);
+    assert!(
+        final_entry["attacks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| {
+                !matches!(item["attack"].as_str(), Some("arora_gb" | "bkw"))
+                    || item["outcome"]["kind"] == "computed"
+            })
+    );
+    assert!(
+        harness
+            .plans
+            .lock()
+            .unwrap()
+            .contains(&vec!["arora_gb".to_owned()])
+    );
+    assert!(
+        harness
+            .plans
+            .lock()
+            .unwrap()
+            .contains(&vec!["bkw".to_owned()])
+    );
+    assert_eq!(
+        json_request(&harness.app, "GET", "/v1/batches", &Value::Null, None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let repeated = json_request(
+        &harness.app,
+        "POST",
+        &format!("/v1/batches/{batch_id}/cases/{case_id}/attacks/arora_gb/force-exact"),
+        &Value::Null,
+        None,
+    )
+    .await;
+    assert_eq!(repeated.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn completed_cases_can_queue_forced_attacks_while_the_batch_is_running() {
+    let harness = harness("196", Duration::from_millis(10), None).await;
+    let mut request = estimate_request("128");
+    let mut second = request.cases[0].clone();
+    second.id = "second-force-case".to_owned();
+    second.name = "Second force case".to_owned();
+    request.cases.push(second);
+    let submitted = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
+    let batch_id = submitted.1["batch_id"].as_str().unwrap().to_owned();
+    let initial = wait_for_terminal(&harness.app, &batch_id).await;
+    let first_case = initial["cases"][0]["case_id"].as_str().unwrap();
+    let second_case = initial["cases"][1]["case_id"].as_str().unwrap();
+    harness
+        .plan_delays
+        .lock()
+        .unwrap()
+        .insert("arora_gb".to_owned(), Duration::from_millis(250));
+
+    assert_eq!(
+        json_request(
+            &harness.app,
+            "POST",
+            &format!("/v1/batches/{batch_id}/cases/{first_case}/attacks/arora_gb/force-exact"),
+            &Value::Null,
+            None,
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+    wait_for_detail(&harness.app, &batch_id, |detail| {
+        detail["cases"][0]["state"]["kind"] == "running"
+    })
+    .await;
+    assert_eq!(
+        json_request(
+            &harness.app,
+            "POST",
+            &format!("/v1/batches/{batch_id}/cases/{second_case}/attacks/bkw/force-exact"),
+            &Value::Null,
+            None,
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+
+    let completed = wait_for_terminal(&harness.app, &batch_id).await;
+    assert_eq!(completed["report"]["reports"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        completed["report"]["reports"][0]["attacks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["attack"] == "arora_gb")
+            .unwrap()["outcome"]["kind"],
+        "computed"
+    );
+    assert_eq!(
+        completed["report"]["reports"][1]["attacks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["attack"] == "bkw")
+            .unwrap()["outcome"]["kind"],
+        "computed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
@@ -111,6 +296,13 @@ async fn explicitly_forced_slow_attacks_bypass_policy_and_keep_using_cache() {
     assert!(plans.contains(&vec!["arora_gb".to_owned()]));
     assert!(plans.contains(&vec!["bkw".to_owned()]));
     assert_eq!(harness.calls.load(Ordering::SeqCst), 4);
+    assert!(
+        completed["report"]["reports"][0]["preflights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["trace"]["code"] == "forced_exact")
+    );
     assert_eq!(
         completed["report"]["name"],
         "Forced slow-attack check security report"
@@ -120,6 +312,131 @@ async fn explicitly_forced_slow_attacks_bypass_policy_and_keep_using_cache() {
     let second = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
     assert_eq!(second.0, StatusCode::OK);
     assert_eq!(harness.calls.load(Ordering::SeqCst), 4);
+    assert!(
+        second.1["report"]["reports"][0]["preflights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["trace"]["code"] == "exact_cache_hit")
+    );
+    let report = &completed["report"]["reports"][0];
+    assert!(report["execution"]["started_at"].is_string());
+    assert!(report["execution"]["finished_at"].is_string());
+    let fast = report["attacks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["attack"] == "usvp")
+        .unwrap();
+    assert_eq!(fast["timing"]["scope"], "request_group");
+    assert!(fast["timing"]["shared_attacks"].as_array().unwrap().len() > 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn unknown_preflight_is_visible_before_and_preserved_with_exact_result() {
+    let harness = harness("96", Duration::ZERO, None).await;
+    harness
+        .preflight_outcomes
+        .lock()
+        .unwrap()
+        .insert("arora_gb".to_owned(), "unknown".to_owned());
+    harness
+        .plan_delays
+        .lock()
+        .unwrap()
+        .insert("arora_gb".to_owned(), Duration::from_millis(300));
+    let submitted = json_request(
+        &harness.app,
+        "POST",
+        "/v1/estimates",
+        &estimate_request("128"),
+        None,
+    )
+    .await;
+    let id = submitted.1["batch_id"].as_str().unwrap();
+    let partial = wait_for_detail(&harness.app, id, |detail| {
+        let entry = &detail["cases"][0]["result"];
+        entry["preflights"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["attack"] == "arora_gb" && item["trace"]["kind"] == "unknown")
+        }) && !entry["attacks"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["attack"] == "arora_gb"))
+    })
+    .await;
+    assert_eq!(partial["state"]["kind"], "running");
+    let completed = wait_for_terminal(&harness.app, id).await;
+    let entry = &completed["report"]["reports"][0];
+    assert!(entry["preflights"].as_array().unwrap().iter().any(|item| {
+        item["attack"] == "arora_gb"
+            && item["trace"]["kind"] == "unknown"
+            && item["trace"]["decision"] == "run_exact"
+    }));
+    assert!(
+        entry["attacks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["attack"] == "arora_gb" && item["outcome"]["kind"] == "computed" })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn failed_preflight_request_falls_back_to_exact_and_keeps_audit_trace() {
+    let harness = harness("96", Duration::ZERO, None).await;
+    harness
+        .preflight_outcomes
+        .lock()
+        .unwrap()
+        .insert("__request__".to_owned(), "failed".to_owned());
+    let submitted = json_request(
+        &harness.app,
+        "POST",
+        "/v1/estimates",
+        &estimate_request("128"),
+        None,
+    )
+    .await;
+    let completed =
+        wait_for_terminal(&harness.app, submitted.1["batch_id"].as_str().unwrap()).await;
+    let entry = &completed["report"]["reports"][0];
+    assert!(entry["preflights"].as_array().unwrap().iter().all(|item| {
+        item["trace"]["kind"] == "failed"
+            && item["trace"]["code"] == "preflight_request_failed"
+            && item["trace"]["decision"] == "run_exact"
+    }));
+    assert!(
+        entry["attacks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["attack"] == "arora_gb" && item["outcome"]["kind"] == "computed" })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn unreviewed_error_domain_records_why_preflight_was_not_run() {
+    let harness = harness("96", Duration::ZERO, None).await;
+    let mut request = estimate_request("128");
+    let lattice_estimator_web::Problem::Lwe(problem) = &mut request.cases[0].problem else {
+        panic!("test request must contain LWE parameters");
+    };
+    problem.error = lattice_estimator_web::ErrorDistribution::UniformInteger {
+        lower: lattice_estimator_web::SignedInteger::new("0").unwrap(),
+        upper: lattice_estimator_web::SignedInteger::new("8").unwrap(),
+    };
+    let submitted = json_request(&harness.app, "POST", "/v1/estimates", &request, None).await;
+    let completed =
+        wait_for_terminal(&harness.app, submitted.1["batch_id"].as_str().unwrap()).await;
+    assert!(
+        completed["report"]["reports"][0]["preflights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["trace"]["kind"] == "not_run"
+                && item["trace"]["code"] == "unreviewed_domain")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
@@ -149,6 +466,13 @@ async fn low_fast_result_runs_independent_slow_attack_plans() {
     ]));
     assert_eq!(harness.calls.load(Ordering::SeqCst), 4);
     assert!((2..=3).contains(&harness.max_active.load(Ordering::SeqCst)));
+    let report = &completed["report"]["reports"][0];
+    assert!(report["preflights"].as_array().unwrap().iter().all(|item| {
+        matches!(
+            item["trace"]["kind"].as_str(),
+            Some("threshold_screen" | "computed")
+        ) && item["trace"]["decision"] == "run_exact"
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
@@ -534,6 +858,7 @@ async fn harness(
     let plan_delays = Arc::new(Mutex::new(HashMap::new()));
     let dimension_delays = Arc::new(Mutex::new(HashMap::new()));
     let retryable_failures = Arc::new(Mutex::new(HashMap::new()));
+    let preflight_outcomes = Arc::new(Mutex::new(HashMap::new()));
     let worker_state = MockState {
         calls: calls.clone(),
         active,
@@ -542,6 +867,7 @@ async fn harness(
         plan_delays: plan_delays.clone(),
         dimension_delays: dimension_delays.clone(),
         retryable_failures: retryable_failures.clone(),
+        preflight_outcomes: preflight_outcomes.clone(),
         delay,
         security_bits,
     };
@@ -575,6 +901,7 @@ async fn harness(
         plan_delays,
         dimension_delays,
         retryable_failures,
+        preflight_outcomes,
         _directory: directory,
         worker,
     }
@@ -582,9 +909,9 @@ async fn harness(
 
 async fn mock_metadata() -> Json<Value> {
     Json(json!({
-        "adapter_schema_version": 2,
+        "adapter_schema_version": 4,
         "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec", "sage_version": "10.9",
-        "adapter_version": "2", "worker_image": "mock-worker", "platform": "linux/amd64",
+        "adapter_version": "5", "worker_image": "mock-worker", "platform": "linux/amd64",
         "support_matrix": {}, "adaptive_attacks": ["arora_gb", "bkw"]
     }))
 }
@@ -630,6 +957,9 @@ async fn mock_estimate(State(state): State<MockState>, Json(request): Json<Value
             if retryable_failure {
                 json!({
                     "attack": attack,
+                    "duration_ms": 1,
+                    "duration_scope": if request["target_attacks"].as_array().unwrap().len() == 1 { "attack" } else { "request_group" },
+                    "shared_attacks": if request["target_attacks"].as_array().unwrap().len() == 1 { json!([]) } else { request["target_attacks"].clone() },
                     "outcome": {
                         "kind": "failed",
                         "code": "mock_retryable_failure",
@@ -640,6 +970,9 @@ async fn mock_estimate(State(state): State<MockState>, Json(request): Json<Value
             } else {
                 json!({
                     "attack": attack,
+                    "duration_ms": 1,
+                    "duration_scope": if request["target_attacks"].as_array().unwrap().len() == 1 { "attack" } else { "request_group" },
+                    "shared_attacks": if request["target_attacks"].as_array().unwrap().len() == 1 { json!([]) } else { request["target_attacks"].clone() },
                     "outcome": {
                         "kind": "computed",
                         "security_bits": state.security_bits,
@@ -651,20 +984,93 @@ async fn mock_estimate(State(state): State<MockState>, Json(request): Json<Value
         .collect::<Vec<_>>();
     state.active.fetch_sub(1, Ordering::SeqCst);
     Json(json!({
-        "schema_version": 2,
+        "schema_version": 4,
         "results": results, "duration_ms": 1,
-        "provenance": { "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec", "sage_version": "10.9", "adapter_version": "2", "adapter_schema_version": 2, "worker_image": "mock-worker" }
+        "provenance": { "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec", "sage_version": "10.9", "adapter_version": "5", "adapter_schema_version": 4, "worker_image": "mock-worker" }
     }))
 }
 
-async fn mock_preflight(State(state): State<MockState>, Json(request): Json<Value>) -> Json<Value> {
+async fn mock_preflight(
+    State(state): State<MockState>,
+    Json(request): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    if state
+        .preflight_outcomes
+        .lock()
+        .unwrap()
+        .get("__request__")
+        .is_some_and(|outcome| outcome == "failed")
+    {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"code": "mock_preflight_unavailable"})),
+        );
+    }
     let results = request["target_attacks"]
         .as_array()
         .unwrap()
         .iter()
         .map(|attack| {
+            let name = attack.as_str().unwrap();
+            if state
+                .preflight_outcomes
+                .lock()
+                .unwrap()
+                .get(name)
+                .is_some_and(|outcome| outcome == "unknown")
+            {
+                return json!({
+                    "attack": attack,
+                    "duration_ms": 2,
+                    "duration_scope": "attack",
+                    "shared_attacks": [],
+                    "outcome": {
+                        "kind": "preflight_unknown",
+                        "code": "bounded_search_no_finite_candidate",
+                        "reason": "mock bounded search found no finite candidate",
+                        "raw_result": {"mock": true}
+                    }
+                });
+            }
+            if name == "arora_gb" {
+                let required = request["required_security_bits"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<f64>()
+                    .unwrap();
+                let requested_margin = request["requested_arora_gb_coarse_margin_bits"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<f64>()
+                    .unwrap();
+                let threshold = required + requested_margin.max(64.0);
+                let above = state.security_bits.parse::<f64>().unwrap() >= threshold;
+                return json!({
+                    "attack": attack,
+                    "duration_ms": 1,
+                    "duration_scope": "attack",
+                    "shared_attacks": [],
+                    "outcome": {
+                        "kind": "threshold_screen",
+                        "decision": if above { "above_threshold" } else { "needs_exact" },
+                        "precision_tier": "coarse",
+                        "required_security_bits": request["required_security_bits"],
+                        "requested_margin_bits": request["requested_arora_gb_coarse_margin_bits"],
+                        "calibrated_margin_floor_bits": "64",
+                        "effective_margin_bits": requested_margin.max(64.0).to_string(),
+                        "decision_threshold_bits": threshold.to_string(),
+                        "reason": if above { "reviewed_search_above_threshold" } else { "candidate_may_be_below_threshold" },
+                        "metrics": {
+                            "preflight_rule_version": {"kind": "integer", "value": "6"}
+                        }
+                    }
+                });
+            }
             json!({
                 "attack": attack,
+                "duration_ms": 1,
+                "duration_scope": "attack",
+                "shared_attacks": [],
                 "outcome": {
                     "kind": "computed",
                     "security_bits": state.security_bits,
@@ -675,18 +1081,21 @@ async fn mock_preflight(State(state): State<MockState>, Json(request): Json<Valu
             })
         })
         .collect::<Vec<_>>();
-    Json(json!({
-        "schema_version": 2,
-        "results": results,
-        "duration_ms": 1,
-        "provenance": {
-            "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec",
-            "sage_version": "10.9",
-            "adapter_version": "2",
-            "adapter_schema_version": 2,
-            "worker_image": "mock-worker"
-        }
-    }))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "schema_version": 4,
+            "results": results,
+            "duration_ms": 1,
+            "provenance": {
+                "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec",
+                "sage_version": "10.9",
+                "adapter_version": "5",
+                "adapter_schema_version": 4,
+                "worker_image": "mock-worker"
+            }
+        })),
+    )
 }
 
 fn estimate_request(required_security: &str) -> EstimateRequest {
@@ -694,7 +1103,9 @@ fn estimate_request(required_security: &str) -> EstimateRequest {
         serde_json::from_str(include_str!("../../examples/demo-run.json")).unwrap();
     value["timeout_seconds"] = json!(10);
     value["slow_attack_policy"]["required_security_bits"] = json!(required_security);
-    value["slow_attack_policy"]["stop_margin_bits"] = json!("16");
+    value["slow_attack_policy"]["arora_gb_coarse_margin_bits"] = json!("64");
+    value["slow_attack_policy"]["arora_gb_refined_margin_bits"] = json!("10");
+    value["slow_attack_policy"]["bkw_margin_bits"] = json!("10");
     let mut request: EstimateRequest = serde_json::from_value(value).unwrap();
     let lattice_estimator_web::Problem::Lwe(problem) = &mut request.cases[0].problem else {
         panic!("demo request must contain LWE parameters");

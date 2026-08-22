@@ -18,6 +18,10 @@
           "error": { "kind": "discrete_gaussian", "standard_deviation": "3.2" }
         }
       },
+      "execution": {
+        "started_at": "2026-08-17T00:00:00Z",
+        "finished_at": "2026-08-17T00:00:08Z"
+      },
       "request_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "provenance": {
         "estimator_commit": "6019056011d10d7e9c30a0d5da2d2f729fbc2eec",
@@ -37,15 +41,47 @@
         "best_attack": "usvp",
         "complete": true
       },
+      "preflights": [
+        {
+          "attack": "arora_gb",
+          "trace": {
+            "kind": "threshold_screen",
+            "precision_tier": "refined",
+            "required_security_bits": "128",
+            "requested_margin_bits": "16",
+            "calibrated_margin_floor_bits": "10",
+            "timing": { "duration_ms": 2, "scope": "attack" },
+            "metrics": {
+              "preflight_rule_version": { "kind": "integer", "value": "6" }
+            },
+            "effective_margin_bits": "16",
+            "threshold_bits": "144",
+            "reason": "candidate_may_be_below_threshold",
+            "decision": "run_exact"
+          }
+        },
+        {
+          "attack": "bkw",
+          "trace": {
+            "kind": "computed",
+            "security_bits": "111",
+            "timing": { "duration_ms": 3, "scope": "attack" },
+            "metrics": {},
+            "effective_margin_bits": "16",
+            "threshold_bits": "144",
+            "decision": "run_exact"
+          }
+        }
+      ],
       "attacks": [
-        { "attack": "arora_gb", "outcome": { "kind": "computed", "security_bits": "110", "duration_ms": 10 } },
-        { "attack": "bkw", "outcome": { "kind": "computed", "security_bits": "111", "duration_ms": 10 } },
-        { "attack": "usvp", "outcome": { "kind": "computed", "security_bits": "100", "duration_ms": 10 } },
-        { "attack": "bdd", "outcome": { "kind": "computed", "security_bits": "101", "duration_ms": 10 } },
-        { "attack": "bdd_hybrid", "outcome": { "kind": "computed", "security_bits": "102", "duration_ms": 10 } },
-        { "attack": "bdd_mitm_hybrid", "outcome": { "kind": "computed", "security_bits": "103", "duration_ms": 10 } },
-        { "attack": "dual", "outcome": { "kind": "computed", "security_bits": "104", "duration_ms": 10 } },
-        { "attack": "dual_hybrid", "outcome": { "kind": "computed", "security_bits": "105", "duration_ms": 10 } }
+        { "attack": "arora_gb", "timing": { "duration_ms": 10, "scope": "attack" }, "outcome": { "kind": "computed", "security_bits": "110" } },
+        { "attack": "bkw", "timing": { "duration_ms": 10, "scope": "attack" }, "outcome": { "kind": "computed", "security_bits": "111" } },
+        { "attack": "usvp", "timing": { "duration_ms": 50, "scope": "request_group", "shared_attacks": ["usvp", "bdd", "bdd_hybrid", "bdd_mitm_hybrid", "dual", "dual_hybrid"] }, "outcome": { "kind": "computed", "security_bits": "100" } },
+        { "attack": "bdd", "timing": { "duration_ms": 50, "scope": "request_group", "shared_attacks": ["usvp", "bdd", "bdd_hybrid", "bdd_mitm_hybrid", "dual", "dual_hybrid"] }, "outcome": { "kind": "computed", "security_bits": "101" } },
+        { "attack": "bdd_hybrid", "timing": { "duration_ms": 50, "scope": "request_group", "shared_attacks": ["usvp", "bdd", "bdd_hybrid", "bdd_mitm_hybrid", "dual", "dual_hybrid"] }, "outcome": { "kind": "computed", "security_bits": "102" } },
+        { "attack": "bdd_mitm_hybrid", "timing": { "duration_ms": 50, "scope": "request_group", "shared_attacks": ["usvp", "bdd", "bdd_hybrid", "bdd_mitm_hybrid", "dual", "dual_hybrid"] }, "outcome": { "kind": "computed", "security_bits": "103" } },
+        { "attack": "dual", "timing": { "duration_ms": 50, "scope": "request_group", "shared_attacks": ["usvp", "bdd", "bdd_hybrid", "bdd_mitm_hybrid", "dual", "dual_hybrid"] }, "outcome": { "kind": "computed", "security_bits": "104" } },
+        { "attack": "dual_hybrid", "timing": { "duration_ms": 50, "scope": "request_group", "shared_attacks": ["usvp", "bdd", "bdd_hybrid", "bdd_mitm_hybrid", "dual", "dual_hybrid"] }, "outcome": { "kind": "computed", "security_bits": "105" } }
       ]
     }
   ]

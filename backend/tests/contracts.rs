@@ -255,7 +255,9 @@ fn lwe_run_requires_explicit_slow_attack_preflight_policy() {
 
     request.slow_attack_policy = Some(SlowAttackPolicy {
         required_security_bits: decimal("128"),
-        stop_margin_bits: decimal("16"),
+        arora_gb_coarse_margin_bits: decimal("64"),
+        arora_gb_refined_margin_bits: decimal("10"),
+        bkw_margin_bits: decimal("10"),
         forced_attacks: Vec::new(),
     });
     request.validate().unwrap();
@@ -264,16 +266,16 @@ fn lwe_run_requires_explicit_slow_attack_preflight_policy() {
         .slow_attack_policy
         .as_mut()
         .unwrap()
-        .stop_margin_bits = decimal("-1");
+        .arora_gb_coarse_margin_bits = decimal("-1");
     assert_eq!(
         request.validate().unwrap_err().path,
-        "slow_attack_policy.stop_margin_bits"
+        "slow_attack_policy.arora_gb_coarse_margin_bits"
     );
     request
         .slow_attack_policy
         .as_mut()
         .unwrap()
-        .stop_margin_bits = decimal("0");
+        .arora_gb_coarse_margin_bits = decimal("0");
     request.validate().unwrap();
 
     request.slow_attack_policy.as_mut().unwrap().forced_attacks = vec![Attack::Usvp];
@@ -326,6 +328,13 @@ fn example_parameter_set_and_report_round_trip() {
     let round_trip: SecurityReportFile =
         serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
     assert_eq!(report, round_trip);
+
+    let mut incomplete = serde_json::to_value(&report).unwrap();
+    incomplete["reports"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("preflights");
+    assert!(serde_json::from_value::<SecurityReportFile>(incomplete).is_err());
 }
 
 #[test]

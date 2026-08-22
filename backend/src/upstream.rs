@@ -4,8 +4,8 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Attack, EstimatorContext, EstimatorProblem, ExactDecimal, NormalizedMetric, ReductionCostModel,
-    ReductionShapeModel, ResolvedAnalysisSettings, error::ServiceError,
+    Attack, DurationScope, EstimatorContext, EstimatorProblem, ExactDecimal, NormalizedMetric,
+    ReductionCostModel, ReductionShapeModel, ResolvedAnalysisSettings, error::ServiceError,
 };
 
 #[derive(Clone)]
@@ -49,6 +49,12 @@ pub struct WorkerRequest {
     pub models: WorkerModels,
     pub target_attacks: Vec<Attack>,
     pub timeout_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_security_bits: Option<ExactDecimal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_arora_gb_coarse_margin_bits: Option<ExactDecimal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_arora_gb_refined_margin_bits: Option<ExactDecimal>,
 }
 
 impl WorkerRequest {
@@ -60,7 +66,7 @@ impl WorkerRequest {
     ) -> Self {
         Self {
             operation: None,
-            schema_version: 2,
+            schema_version: 4,
             problem,
             models: WorkerModels {
                 cost_model: analysis.cost_model,
@@ -68,6 +74,9 @@ impl WorkerRequest {
             },
             target_attacks,
             timeout_seconds,
+            required_security_bits: None,
+            requested_arora_gb_coarse_margin_bits: None,
+            requested_arora_gb_refined_margin_bits: None,
         }
     }
 }
@@ -97,6 +106,9 @@ pub struct WorkerProvenance {
 pub struct WorkerAttackExecution {
     pub attack: Attack,
     pub outcome: WorkerOutcome,
+    pub duration_ms: u64,
+    pub duration_scope: DurationScope,
+    pub shared_attacks: Vec<Attack>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -116,6 +128,20 @@ pub enum WorkerOutcome {
     PreflightUnknown {
         code: String,
         reason: String,
+        #[serde(default)]
+        raw_result: Option<serde_json::Value>,
+    },
+    ThresholdScreen {
+        decision: WorkerThresholdDecision,
+        precision_tier: WorkerPrecisionTier,
+        required_security_bits: ExactDecimal,
+        requested_margin_bits: ExactDecimal,
+        calibrated_margin_floor_bits: ExactDecimal,
+        effective_margin_bits: ExactDecimal,
+        decision_threshold_bits: ExactDecimal,
+        reason: String,
+        #[serde(default)]
+        metrics: std::collections::BTreeMap<String, NormalizedMetric>,
     },
     Unsupported {
         code: String,
@@ -126,6 +152,20 @@ pub enum WorkerOutcome {
         message: String,
         retryable: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerThresholdDecision {
+    AboveThreshold,
+    NeedsExact,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPrecisionTier {
+    Coarse,
+    Refined,
 }
 
 impl EstimatorClient {

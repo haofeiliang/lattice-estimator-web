@@ -17,7 +17,9 @@
   let mode: 'rough' | 'normal' = 'normal';
   let timeout = 3600;
   let requiredBits = '128';
-  let marginBits = '16';
+  let aroraCoarseMarginBits = '64';
+  let aroraRefinedMarginBits = '10';
+  let bkwMarginBits = '10';
   let forceAroraGb = false;
   let forceBkw = false;
   let busy = false;
@@ -112,7 +114,9 @@
         ? {
           slow_attack_policy: {
             required_security_bits: requiredBits,
-            stop_margin_bits: marginBits,
+            arora_gb_coarse_margin_bits: aroraCoarseMarginBits,
+            arora_gb_refined_margin_bits: aroraRefinedMarginBits,
+            bkw_margin_bits: bkwMarginBits,
             ...(forcedAttacks.length ? { forced_attacks: forcedAttacks } : {}),
           }
         }
@@ -271,7 +275,9 @@
     {#if drafts.length > 0}
       <header>
         <div><p class="eyebrow">编辑参数方案</p><h2>{setName || setId}</h2></div>
-        <div class="actions">
+        <div class="actions top-editor-actions">
+          <button class="secondary" disabled={busy} on:click={save}>{busy ? '处理中…' : selected ? '保存新版本' : '保存方案'}</button>
+          <button class="primary" disabled={busy} on:click={run}>{busy ? '处理中…' : '运行全部参数'}</button>
           <button on:click={() => download(`${setId}.lattice-params.json`, value())}>导出 JSON</button>
           {#if selected}<button class="danger" on:click={() => remove(selected)}>删除</button>{/if}
         </div>
@@ -306,14 +312,23 @@
         </div>
         <div class="form-grid compact">
           <label>超时（秒）<input type="number" min="1" max="7200" bind:value={timeout} /></label>
-          {#if mode === 'normal'}<label>目标安全 bit<input bind:value={requiredBits} /></label><label>慢攻击跳过余量<input bind:value={marginBits} /></label>{/if}
+          {#if mode === 'normal'}<label>目标安全 bit<input bind:value={requiredBits} /></label>{/if}
         </div>
         {#if mode === 'normal'}
-          <div class="force-options">
-            <span><strong>手动运行慢攻击</strong><small>绕过适用域与安全余量判断；可能耗时很久，已有成功结果仍会使用缓存。</small></span>
-            <label class="check-option"><input type="checkbox" bind:checked={forceAroraGb} /> 强制 Arora-GB</label>
-            <label class="check-option"><input type="checkbox" bind:checked={forceBkw} /> 强制 BKW</label>
-          </div>
+          <details class="advanced-run-settings">
+            <summary>高级运行设置</summary>
+            <p class="hint">分别设置各筛选阶段的自定义最低跳过余量；实际值不会低于经校准的安全下限。</p>
+            <div class="form-grid advanced-margin-grid">
+              <label>Arora-GB 粗筛自定义最低跳过余量<input min="0" type="number" bind:value={aroraCoarseMarginBits} /></label>
+              <label>Arora-GB 精筛自定义最低跳过余量<input min="0" type="number" bind:value={aroraRefinedMarginBits} /></label>
+              <label>BKW 自定义最低跳过余量<input min="0" type="number" bind:value={bkwMarginBits} /></label>
+            </div>
+            <div class="force-options">
+              <span><strong>手动运行慢攻击</strong><small>绕过适用域与安全余量判断；可能耗时很久，已有成功结果仍会使用缓存。</small></span>
+              <label class="check-option"><input type="checkbox" bind:checked={forceAroraGb} /> 强制 Arora-GB</label>
+              <label class="check-option"><input type="checkbox" bind:checked={forceBkw} /> 强制 BKW</label>
+            </div>
+          </details>
         {/if}
       </section>
 

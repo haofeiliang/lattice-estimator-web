@@ -1,16 +1,71 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import EstimatePanel from './EstimatePanel.svelte';
   import RunsPanel from './RunsPanel.svelte';
   import SchemePanel from './SchemePanel.svelte';
   import { api, getToken, setToken, userMessage } from './api';
+  import type { EstimateDraftSource, EstimateRequest } from './types';
 
   type Tab = 'estimate' | 'schemes' | 'runs';
-  let tab: Tab = 'estimate';
+  const tabPaths: Record<Tab, string> = {
+    estimate: '/estimate',
+    schemes: '/schemes',
+    runs: '/runs',
+  };
+  function routeFromLocation() {
+    const path = window.location.pathname.replace(/\/+$/, '') || '/';
+    const tab = (Object.entries(tabPaths).find(([, value]) => value === path)?.[0] ?? 'estimate') as Tab;
+    const batchId = tab === 'runs' ? new URLSearchParams(window.location.search).get('batch') ?? '' : '';
+    return { tab, batchId, canonical: path === tabPaths[tab] };
+  }
+  const initialRoute = routeFromLocation();
+  let tab: Tab = initialRoute.tab;
+  let selectedBatchId = initialRoute.batchId;
   let token = getToken();
   let authenticated = false;
   let checking = true;
   let error = '';
   let metadata: Record<string, unknown> = {};
+  let estimateDraftSource: EstimateDraftSource | undefined;
+  let editSequence = 0;
+
+  function applyLocation() {
+    const route = routeFromLocation();
+    tab = route.tab;
+    selectedBatchId = route.batchId;
+  }
+
+  function navigate(nextTab: Tab, batchId = nextTab === 'runs' ? selectedBatchId : '', replace = false) {
+    const url = new URL(window.location.href);
+    url.pathname = tabPaths[nextTab];
+    url.search = '';
+    if (nextTab === 'runs' && batchId) url.searchParams.set('batch', batchId);
+    if (url.pathname === window.location.pathname && url.search === window.location.search) {
+      applyLocation();
+      return;
+    }
+    window.history[replace ? 'replaceState' : 'pushState']({}, '', url);
+    applyLocation();
+  }
+
+  function editBatch(request: EstimateRequest, batchId: string, focusCaseId?: string) {
+    estimateDraftSource = {
+      sequence: ++editSequence,
+      batchId,
+      request,
+      ...(focusCaseId ? { focusCaseId } : {}),
+    };
+    navigate('estimate');
+  }
+
+  onMount(() => {
+    if (!initialRoute.canonical || (tab !== 'runs' && window.location.search)) {
+      navigate(tab, selectedBatchId, true);
+    }
+    const handlePopState = () => applyLocation();
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  });
 
   async function connect() {
     setToken(token); checking = true; error = '';
@@ -38,13 +93,17 @@
   </main>
 {:else}
   <nav class="tabs" aria-label="主导航">
-    <button class:active={tab === 'estimate'} on:click={() => tab = 'estimate'}>安全估算</button>
-    <button class:active={tab === 'schemes'} on:click={() => tab = 'schemes'}>方案库</button>
-    <button class:active={tab === 'runs'} on:click={() => tab = 'runs'}>运行批次</button>
+    <button class:active={tab === 'estimate'} on:click={() => navigate('estimate')}>安全估算</button>
+    <button class:active={tab === 'schemes'} on:click={() => navigate('schemes')}>方案库</button>
+    <button class:active={tab === 'runs'} on:click={() => navigate('runs')}>运行批次</button>
   </nav>
   <main class="workspace">
-    {#if tab === 'estimate'}<EstimatePanel />
-    {:else if tab === 'schemes'}<SchemePanel />
-    {:else}<RunsPanel />{/if}
+    <div hidden={tab !== 'estimate'}><EstimatePanel editSource={estimateDraftSource} /></div>
+    {#if tab === 'schemes'}<SchemePanel />
+    {:else if tab === 'runs'}<RunsPanel
+      onEditRequest={editBatch}
+      {selectedBatchId}
+      onSelectionChange={(batchId, replace) => navigate('runs', batchId, replace)}
+    />{/if}
   </main>
 {/if}

@@ -196,11 +196,23 @@ impl Validate for EstimateRequest {
                     "required security must be positive",
                 ));
             }
-            if policy.stop_margin_bits.as_str().starts_with('-') {
-                return Err(ValidationError::new(
-                    "slow_attack_policy.stop_margin_bits",
-                    "stop margin cannot be negative",
-                ));
+            for (field, margin) in [
+                (
+                    "arora_gb_coarse_margin_bits",
+                    &policy.arora_gb_coarse_margin_bits,
+                ),
+                (
+                    "arora_gb_refined_margin_bits",
+                    &policy.arora_gb_refined_margin_bits,
+                ),
+                ("bkw_margin_bits", &policy.bkw_margin_bits),
+            ] {
+                if margin.as_str().starts_with('-') {
+                    return Err(ValidationError::new(
+                        format!("slow_attack_policy.{field}"),
+                        "custom minimum stop margin cannot be negative",
+                    ));
+                }
             }
             let mut forced = BTreeSet::new();
             for (index, attack) in policy.forced_attacks.iter().enumerate() {
